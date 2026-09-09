@@ -295,7 +295,7 @@ import { logger } from '../src/utils/logger.js';
 
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), 'restore-zombie-test-'));
-  sessionStore.init();
+  sessionStore.init('app_test');
   wp.registry = null;
   transferState.active = new WeakSet<object>();
   transferState.callbacks = new WeakMap<object, Set<() => void>>();
@@ -578,7 +578,7 @@ describe('restoreActiveSessions — mojo identity freeze attribution (P0-4)', ()
     s.cliId = undefined;
     s.riffParentTaskId = 'legacy-task-1';
     sessionStore.updateSession(s);
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
 
@@ -604,7 +604,7 @@ describe('restoreActiveSessions — mojo identity freeze attribution (P0-4)', ()
     s.backendType = undefined;
     s.cliId = undefined;
     sessionStore.updateSession(s);
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
 
@@ -763,7 +763,7 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
       updatedAt: new Date().toISOString(),
     };
     sessionStore.updateSession(s);
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
 
@@ -799,7 +799,7 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
       updatedAt: new Date().toISOString(),
     };
     sessionStore.updateSession(s);
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
 
@@ -830,7 +830,7 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
       updatedAt: new Date().toISOString(),
     };
     sessionStore.updateSession(s);
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
 
@@ -858,7 +858,7 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
       updatedAt: new Date().toISOString(),
     };
     sessionStore.updateSession(s);
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
 
@@ -898,7 +898,7 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
       updatedAt: new Date().toISOString(),
     };
     sessionStore.updateSession(s);
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
 
@@ -930,7 +930,7 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
       updatedAt: new Date().toISOString(),
     };
     sessionStore.updateSession(s);
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
 
@@ -960,7 +960,7 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
       updatedAt: '',
     };
     sessionStore.updateSession(s);
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
 
@@ -1501,7 +1501,7 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
 
     // Simulate a fresh daemon process: discard the in-memory store and reload
     // the active session from sessions.json before restoring workers.
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
 
@@ -1609,7 +1609,7 @@ describe('restoreActiveSessions — stale preview target cleanup', () => {
 
     // Re-read from disk: a target that survived the write would come back on
     // the next restart (or through any offline row reader).
-    sessionStore.init();
+    sessionStore.init('app_test');
     expect(sessionStore.getSession(s.sessionId)?.previewTarget).toBeUndefined();
   });
 
