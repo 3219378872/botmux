@@ -337,7 +337,7 @@ import { resolvePassthroughCommands, resolveAdapterDefaultPassthroughCommands, h
 import { classifySlash, isCommandDecision, type CascadeItem } from './core/command-router.js';
 import { deriveSessionPhase } from './core/session-phase.js';
 import { cascadeTiming, waitForCliIdle, waitForCommandSettled } from './core/cli-idle-wait.js';
-import { parseTopicHeader, parseTopicHeaderWithLifecycleAliases, isTopicHeader, isTopicHeaderError, topicHeaderDeclaresSpec } from './core/topic-header.js';
+import { parseTopicHeader, isTopicHeader, isTopicHeaderError, topicHeaderDeclaresSpec } from './core/topic-header.js';
 import { resolveTopicSpec, type TopicSpec } from './core/topic-spec.js';
 import { topicHeaderErrorText, topicHeaderReadyText, topicSpecErrorText } from './core/topic-header-messages.js';
 import { docWatchCommandNeedsSession } from './core/doc-watch-command.js';
@@ -21771,20 +21771,11 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
     followupMentions,
     { botOpenId: selfBotForHeader.botOpenId, larkAppId },
   );
-  const lifecycleAlias = /^\s*\/(th|tw)(?:\s+([\s\S]*))?$/i.exec(strippedTopicHeader);
-  const lifecycleVariant = /^\s*\/(t|topic)\s+(here|worktree)(?:\s+([\s\S]*))?$/i.exec(strippedTopicHeader);
-  const forceTopicMode: 'default' | 'here' | 'worktree' = lifecycleAlias
-    ? (lifecycleAlias[1]!.toLowerCase() === 'tw' ? 'worktree' : 'here')
-    : lifecycleVariant
-      ? (lifecycleVariant[2]!.toLowerCase() === 'worktree' ? 'worktree' : 'here')
-      : 'default';
-  const normalizedTopicHeader = lifecycleAlias
-    ? `/t ${lifecycleAlias[2] ?? ''}`.trimEnd()
-    : lifecycleVariant
-      ? `/${lifecycleVariant[1]} ${lifecycleVariant[3] ?? ''}`.trimEnd()
-      : strippedTopicHeader;
-  const headerParse = parseTopicHeader(normalizedTopicHeader);
+  // `/th` `/tw` `/t here|worktree` 生命周期变体由解析器给出（`header.lifecycle`），与 `/repo` 相斥
+  // 的组合由 resolveTopicSpec 拒绝——入口这里不再对原文做任何正则预判。
+  const headerParse = parseTopicHeader(strippedTopicHeader);
   const forceTopic = isTopicHeader(headerParse) ? headerParse : null;
+  const forceTopicMode: 'default' | 'here' | 'worktree' = forceTopic?.lifecycle ?? 'default';
   let topicSpec: TopicSpec | undefined;
   if (headerParse !== null) {
     // 授权闸在校验之前：没资格开话题的人，连用法提示都不该拿到。
@@ -22375,9 +22366,8 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
   // 话题建好后走与 auto-worktree / `/tw` 同一条 pre-fork 路径（force + branch）建 worktree，
   // 再由 commitRepoSelection 把 workingDir 改钉到新 worktree 并 fork（设计 R9 / §8）。
   // 它同样是用户显式选仓，所以 pinnedFromBotDefault 也翻成 false。
-  // `/th` `/tw` 生命周期变体钉的是「当前会话目录」，与头部 `/repo …` 相斥时沿用主干既有
-  // 优先级：生命周期目录优先、头部仓库指令让位（`/th /repo x` 今天就是这样，见设计 §15）。
-  const headerWorktree = forceTopicMode === 'default' ? topicSpec?.worktree : undefined;
+  // `/th` `/tw` 生命周期变体与头部 `/repo …` 相斥的组合已在 resolveTopicSpec 被拒，这里两者互斥成立。
+  const headerWorktree = topicSpec?.worktree;
   const pinnedWorkingDir = lifecycleWorkingDir ?? headerWorktree?.repoPath ?? topicSpec?.workingDir ?? headerDefaultStartDir ?? configPinnedWorkingDir;
   const pinnedFromBotDefault = (lifecycleWorkingDir || headerWorktree || topicSpec?.workingDir || headerStartInDefaultDir)
     ? false
@@ -24000,7 +23990,7 @@ async function handleThreadReplyAdmitted(
     }
   }
 
-  const threadHeaderParse = parseTopicHeaderWithLifecycleAliases(stripBotMentions(
+  const threadHeaderParse = parseTopicHeader(stripBotMentions(
     cmdContent,
     parsed.mentions,
     { botOpenId: getBot(larkAppId).botOpenId, larkAppId },

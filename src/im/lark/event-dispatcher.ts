@@ -16,7 +16,7 @@ import { logger } from '../../utils/logger.js';
 import { BoundedMap } from '../../utils/bounded-map.js';
 import { serializeByAnchor } from '../../utils/anchor-serializer.js';
 import { parseSlashCommandInvocation, resolvePassthroughCommands } from '../../core/command-handler.js';
-import { isTopicHeader, parseTopicHeader, parseTopicHeaderWithLifecycleAliases } from '../../core/topic-header.js';
+import { isTopicHeader, parseTopicHeader } from '../../core/topic-header.js';
 import { commandTriggerArgs, matchCommandTrigger, type CommandTriggerMatch } from '../../services/command-trigger.js';
 import { shouldAutoStartOnNewTopic } from '../../core/auto-start.js';
 import { resolveNonsupportMessage, stripBotMentions, stripLeadingMentions, mentionOpenId, mentionAppId, extractMentionIdentities, messageMentionsBot, type MentionIdentity } from './message-parser.js';
@@ -3025,7 +3025,7 @@ export function maybeApplyForceTopicOverride(
   // 指令头（`[标题] /t …`）与生命周期别名 `/th` `/tw` 走同一条判定。语法与
   // 完整规格都校验成功后才能翻 scope；否则错误必须留在原 chat 中，不能先产生
   // 新话题副作用。
-  const header = parseTopicHeaderWithLifecycleAliases(stripped);
+  const header = parseTopicHeader(stripped);
   if (!isTopicHeader(header) || (validateTopicHeader && !validateTopicHeader(header, larkAppId))) return false;
   routing.scope = 'thread';
   routing.anchor = messageId;
@@ -3111,7 +3111,7 @@ async function maybeFoldMentionedRegularGroupThreadToChat(input: {
   if (threadId.startsWith('omt_') && resolveRegularGroupMode(larkAppId, chatId) === 'chat-topic') return undefined;
   const rawText = extractMessageTextForRouting(message);
   if (rawText) {
-    if (isTopicHeader(parseTopicHeaderWithLifecycleAliases(stripHeaderMentions(rawText, message, larkAppId)))) return undefined;
+    if (isTopicHeader(parseTopicHeader(stripHeaderMentions(rawText, message, larkAppId)))) return undefined;
   }
 
   // In a regular group, `chat` and `shared` both mean "use the group's one
@@ -3224,7 +3224,7 @@ async function isExplicitP2pTopic(input: {
       // The /repo worktree validator is not available here; a root that truly
       // materialized a topic already passed it when the seed was routed.
       const stripped = stripHeaderMentions(rawText, { mentions: root.mentions }, larkAppId);
-      if (!isTopicHeader(parseTopicHeaderWithLifecycleAliases(stripped))) return false;
+      if (!isTopicHeader(parseTopicHeader(stripped))) return false;
       recordP2pForceTopicRoot(larkAppId, rootId, chatId);
       return true;
     } catch (err) {
