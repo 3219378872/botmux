@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { GOAL_ENV } from './workflows/v3/contract.js';
+import { supportsZeroPromptInjection } from './core/prompt-injection.js';
+import { clearBotmuxPromptEnv } from './skills/zero-injection.js';
 /**
  * Worker process: manages a single CLI PTY session + web terminal.
  * Forked by the daemon, communicates via Node.js IPC.
@@ -1301,6 +1304,7 @@ async function engageCodexRpc(cfg: Extract<DaemonToWorker, { type: 'init' }>): P
     // injects into the TUI — else a 3rd-party-provider bot's app-server silently
     // falls back to the default provider. Re-sanitized (crossed IPC).
     Object.assign(engineEnv, sanitizePerBotEnv(cfg.env));
+    if (cfg.promptInjection === 'none') clearBotmuxPromptEnv(engineEnv);
     applyCodexInstanceEnv(engineEnv, cfg.cliInstanceBinding);
     // Session identity is host-owned. Pin it after the config-controlled merge,
     // matching every other backend and preventing stale owner resurrection.
@@ -1650,6 +1654,10 @@ function refreshCliPluginGeneration(
   cfg: Extract<DaemonToWorker, { type: 'init' }>,
   adapter: CliAdapter,
 ): void {
+  if (cfg.promptInjection === 'none' && (!supportsZeroPromptInjection(cfg.cliId, cfg)
+    || process.env[GOAL_ENV.V3_MARKER] === '1')) {
+    throw new Error('零注入需要本地 CLI 支持自动获取最终回复，暂不支持远端后端或 v3 workflow');
+  }
   const bot = resolvePluginGenerationBot(cfg);
 
   const generation = prepareCliPluginGeneration({
@@ -1662,6 +1670,7 @@ function refreshCliPluginGeneration(
     workingDir: cfg.workingDir,
     prompt: cfg.prompt,
     replacesPriorGeneration: cfg.resume === true,
+    promptInjection: cfg.promptInjection,
   });
   for (const diagnostic of generation.diagnostics) log(`Plugin generation: ${diagnostic}`);
   if (generation.fatal) {
@@ -2306,6 +2315,18 @@ let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
  *  fail-closed 等于历史行为。 */
 function replyDeliveryMode(): 'send' | 'transcript' {
   return lastInitConfig?.replyDelivery === 'transcript' ? 'transcript' : 'send';
+}
+
+function zeroPromptTerminalSync(): boolean {
+  return lastInitConfig?.promptInjection === 'none' && !lastInitConfig.adoptMode
+    && !lastInitConfig.apiOnly;
+}
+
+function notifyTerminalTurnStarted(turn: { turnId: string; markTimeMs?: number; replyContextTurnId?: string }): void {
+  if (zeroPromptTerminalSync()) {
+    send({ type: 'terminal_turn_started', turnId: turn.turnId, startedAtMs: turn.markTimeMs ?? Date.now(),
+      ...(turn.replyContextTurnId ? { replyContextTurnId: turn.replyContextTurnId } : {}) });
+  }
 }
 let closeRequested = false;
 /** Dashboard「复现命令」：session 冷启时最终交给 backend.spawn 的真实调用
@@ -4702,7 +4723,7 @@ let bridgeStalePidStateSessionId: string | undefined;
 const bridgeSecondaryPaths = new Map<string, number>(); // path → offset
 let bridgeOffset = 0;
 let bridgePendingTail = '';
-const bridgeQueue = new BridgeTurnQueue();
+const bridgeQueue = new BridgeTurnQueue(notifyTerminalTurnStarted);
 /** Counts background Agent/Task dispatches whose completion notification has
  *  not yet arrived. Consulted at the PTY idle edge (markPromptReady): a main
  *  turn that only went quiet because it is awaiting a background sub-agent must
@@ -4897,7 +4918,7 @@ let codexBridgePendingTail = '';
 let codexBridgeBaselineDone = false;
 let publishedActiveRuntime: TraexRuntimeSnapshot = {};
 let activeRuntimePublished = false;
-const codexBridgeQueue = new CodexBridgeQueue();
+const codexBridgeQueue = new CodexBridgeQueue(Date.now, notifyTerminalTurnStarted);
 // Structured rollout CoT: Codex response items and TraeX history mutations emit
 // rollout reasoning/tool events attributed to the collecting turn, feeding
 // the same thinking channel as Claude's transcript attribution. Other
@@ -6485,7 +6506,7 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     // provider error through transcript fallback (regardless of send markers).
     if (turn.terminalOutcome && turn.terminalOutcome.status !== 'completed') continue;
     const nextBoundaryMs = (i + 1 < ready.length ? ready[i + 1].markTimeMs : nextPendingMarkTimeMs);
-    if (turn.isLocal && shouldSuppressBridgeEmit({ markTimeMs: turn.markTimeMs, isLocal: turn.isLocal }, nextBoundaryMs, markers, adoptMode, replyDeliveryMode())) {
+    if (turn.isLocal && !zeroPromptTerminalSync() && shouldSuppressBridgeEmit({ markTimeMs: turn.markTimeMs, isLocal: turn.isLocal }, nextBoundaryMs, markers, adoptMode, replyDeliveryMode())) {
       const reason = turn.isLocal ? 'local-typed' : 'model called botmux send within window';
       log(`Bridge fallback suppressed for turn ${turn.turnId.substring(0, 8)} (${reason})`);
       continue;
@@ -6510,7 +6531,8 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     if (assistantText.length === 0) continue;
     const lastUuid = turn.assistantUuids[turn.assistantUuids.length - 1];
 
-    const gateInput = { markTimeMs: turn.markTimeMs, isLocal: turn.isLocal, finalText: assistantText };
+    const gateInput = { markTimeMs: turn.markTimeMs, isLocal: turn.isLocal, finalText: assistantText,
+      forwardLocalFinal: zeroPromptTerminalSync() };
     notifyExplicitRepliesObserved(
       turn.turnId,
       attributableExplicitReplyMarkersForTurnWindow(
@@ -6548,7 +6570,7 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     const postText = bridgePostText(assistantText, adoptMode);
     if (!adoptMode && postText.trim().length === 0) continue;
 
-    if (turn.isLocal) {
+    if (turn.isLocal && !zeroPromptTerminalSync()) {
       if (turn.userUuid) {
         // Local turn (adopt mode only): also surface the user prompt so the
         // Lark thread shows both sides of the exchange. User text comes from
@@ -6605,6 +6627,7 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
       content: deliveredText,
       lastUuid,
       turnId: turn.turnId,
+      ...(turn.isLocal && zeroPromptTerminalSync() ? { terminalLocal: true } : {}),
       ...(turn.dispatchAttempt !== undefined ? { dispatchAttempt: turn.dispatchAttempt } : {}),
     });
   }
@@ -8216,12 +8239,13 @@ function emitReadyCodexTurns(): void {
     // no pending Lark fingerprint and must be forwarded like terminal
     // `/adopt`, including both the App prompt and its final reply.
     const adoptMode = terminalAdoptMode
-      || (sharedAppServerBridge && turn.isLocal === true);
+      || (sharedAppServerBridge && turn.isLocal === true && !zeroPromptTerminalSync());
     const sourceHermesSessionId = structuredBridgeIsHermes() ? turn.sourceSessionId : undefined;
     const nextBoundaryMs = (i + 1 < ready.length ? ready[i + 1].markTimeMs : nextPendingMarkTimeMs);
     const gateInput = {
       markTimeMs: turn.markTimeMs,
       isLocal: turn.isLocal,
+      forwardLocalFinal: zeroPromptTerminalSync(),
       finalText: turn.finalText,
       terminalStatus: turn.terminalStatus,
       terminalErrorCode: turn.terminalErrorCode,
@@ -8290,7 +8314,7 @@ function emitReadyCodexTurns(): void {
     // already refuses to interpret the sentinel under adoptMode.
     const postContent = bridgePostText(content, adoptMode);
     if (!adoptMode && postContent.trim().length === 0) continue;
-    if (turn.isLocal) {
+    if (turn.isLocal && !zeroPromptTerminalSync()) {
       // Local turn (adopt only): user typed in iTerm. Surface both sides
       // so the Lark thread sees a complete exchange instead of an orphan
       // reply. formatLocalTurnFields caps both texts to keep within
@@ -8319,6 +8343,7 @@ function emitReadyCodexTurns(): void {
       content: postContent,
       lastUuid: turn.turnId,
       turnId: turn.turnId,
+      ...(turn.isLocal && zeroPromptTerminalSync() ? { terminalLocal: true } : {}),
       ...(turn.dispatchAttempt !== undefined ? { dispatchAttempt: turn.dispatchAttempt } : {}),
       // Failure-fallback notice (not a model answer): lets the daemon add a
       // human @mention so e.g. a model-gateway outage doesn't scroll by
@@ -15389,6 +15414,7 @@ async function spawnCli(
     }
   }
   const perBotInjectEnv = sanitizePerBotEnv(cfg.env);
+  if (cfg.promptInjection === 'none') clearBotmuxPromptEnv(perBotInjectEnv);
   const cliExtra = cliAdapter.allowExtraArgs === false
     ? ''
     : (process.env.CLI_EXTRA_ARGS ?? '').trim();
@@ -15459,6 +15485,7 @@ async function spawnCli(
     ...(Object.keys(identityShellEnv).length ? { shellSubprocessEnv: identityShellEnv } : {}),
     // replyDelivery=transcript + solo：daemon 冻结在 init 上的值，系统提示改口用。
     replyDelivery: cfg.replyDelivery,
+    promptInjection: cfg.promptInjection,
     solo: cfg.solo,
     locale: cfg.locale,
     model: ttadkGateway ? undefined : cfg.model,
@@ -15574,6 +15601,7 @@ async function spawnCli(
   // namespaced BOTMUX_LARK_APP_ID injected below; the worker keeps its own
   // bare creds (forkWorker) for lark-upload. See utils/child-env.ts.
   const childEnv = redactChildEnv(process.env);
+  if (cfg.promptInjection === 'none') clearBotmuxPromptEnv(childEnv);
   childEnv[PLUGIN_CARD_ACTION_CAPABILITIES_ENV] = cardActionCapabilities;
   if (sessionMcpGatewayHost) {
     childEnv[MCP_GATEWAY_SOCKET_ENV] = sessionMcpGatewayHost.socketPath;
@@ -17276,6 +17304,9 @@ async function spawnCli(
   // Mode uses effectiveResume: when the resume probe flipped us to FRESH, we
   // must NOT baseline the "restored" cursor against an empty / absent store
   // (would otherwise swallow the fresh session's first turn).
+  if (zeroPromptTerminalSync()) {
+    codexBridgeQueue.setLocalTurns(true, Date.now());
+  }
   if (cfg.cliId === 'hermes') {
     hermesBridgeAttach(effectiveResume ? 'baseline-existing' : 'fresh-empty');
   } else if (cfg.cliId === 'codex') {
