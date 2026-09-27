@@ -17036,7 +17036,7 @@ function deliverFinalOutput(
         finishVcMeetingImReply(config.session.dataDir, preparedListenerReply.ref, messageId);
       }
       if (!managedReceiver && (!msg.kind || msg.kind === 'bridge')
-        && ds.initConfig?.promptInjection === 'none') {
+        && sessionPromptInjection(ds) === 'none') {
         // Reporting is a separate sink. Its bounded retries must not resend
         // the already-delivered card or delay this sub-session's settlement.
         const report = cb.onZeroPromptFinal;

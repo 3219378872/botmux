@@ -292,7 +292,7 @@ export function buildOrchestratorReportTrigger(
 ): Record<string, unknown> {
   return {
     ...(meta.turnIdempotencyKey ? { options: {
-      asyncReturnSessionId: true, turnIdempotencyKey: meta.turnIdempotencyKey,
+      turnIdempotencyKey: meta.turnIdempotencyKey,
     } } : {}),
     source: {
       type: 'ui',

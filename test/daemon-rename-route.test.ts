@@ -2523,10 +2523,14 @@ describe('/rename production routing — must not pre-create a session (review P
     }
   });
 
-  it('zero-injection pending-repo attachments remain on separate opening and successor turns', async () => {
+  it.each(['persisted', 'live legacy'] as const)('zero-injection %s pending-repo attachments remain on separate turns', async (snapshot) => {
     const anchor = 'om_zero_pending';
     const ds = seedPendingRawSession(anchor);
-    ds.session.promptInjection = 'none';
+    if (snapshot === 'persisted') ds.session.promptInjection = 'none';
+    else {
+      delete ds.session.promptInjection;
+      ds.initConfig = { ...ds.initConfig, promptInjection: 'none' } as any;
+    }
     ds.pendingRawInput = undefined;
     ds.pendingPrompt = 'opening task';
     ds.pendingAttachments = [{ type: 'file', name: 'opening.md', path: '/tmp/opening.md' }];

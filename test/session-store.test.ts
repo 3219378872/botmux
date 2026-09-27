@@ -4819,6 +4819,19 @@ it('deeply snapshots group model and effort without changing runtime identity', 
 
 
 describe('session prompt injection snapshot', () => {
+  it('preserves a frozen mode when a whole-row writer holds a stale snapshot', () => {
+    const appId = 'cli_prompt_stale';
+    registerCodexInstanceBot({ larkAppId: appId, cliId: 'claude-code', promptInjection: 'none' } as any);
+    init(appId);
+    const session = createSession('oc_stale', 'om_stale', 'original');
+    const stale = { ...session };
+    delete stale.promptInjection;
+    stale.title = 'updated title';
+    updateSession(stale);
+    init(appId);
+    expect(getSession(session.sessionId)).toMatchObject({ title: 'updated title', promptInjection: 'none' });
+  });
+
   it('persists the chosen mode across bot toggles, reload and inherited forks', () => {
     const appId = 'cli_prompt_snapshot';
     const bot = { larkAppId: appId, cliId: 'claude-code', promptInjection: 'none' } as any;

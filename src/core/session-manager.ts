@@ -229,6 +229,7 @@ async function resumeRestoredPendingRepoSetup(
         larkAppId: ds.larkAppId,
         chatId: ds.chatId,
         whiteboardId: ds.session.whiteboardId,
+        promptInjection: sessionPromptInjection(ds),
         substituteTrigger: ds.pendingSubstituteTrigger,
         codexAppText: ds.pendingCodexAppText,
         codexAppApplicationContext: ds.pendingCodexAppApplicationContext,
@@ -4244,6 +4245,7 @@ export async function executeScheduledTask(
           chatId: task.chatId,
           whiteboardId: existing.session.whiteboardId,
           sessionBackendType: existing.session.backendType,
+          promptInjection: sessionPromptInjection(existing),
           turnId: scheduledTurnId,
           trustedCaller: scheduledTrustedCaller,
         });
@@ -4362,7 +4364,7 @@ export async function executeScheduledTask(
       sessionStore.updateSession(ds.session);
     }
     ensureSessionWhiteboard(ds);
-    const prompt = buildNewTopicCliInput(firePrompt, session.sessionId, ds.session.cliLaunchSnapshot?.cliId ?? session.cliId ?? bot.config.cliId, ds.session.cliLaunchSnapshot?.cliPathOverride ?? session.cliPathOverride ?? bot.config.cliPathOverride, undefined, undefined, undefined, undefined, { name: bot.botName, openId: bot.botOpenId }, localeForBot(larkAppId), undefined, { larkAppId, chatId: task.chatId, whiteboardId: ds.session.whiteboardId, trustedCaller: scheduledTrustedCaller });
+    const prompt = buildNewTopicCliInput(firePrompt, session.sessionId, ds.session.cliLaunchSnapshot?.cliId ?? session.cliId ?? bot.config.cliId, ds.session.cliLaunchSnapshot?.cliPathOverride ?? session.cliPathOverride ?? bot.config.cliPathOverride, undefined, undefined, undefined, undefined, { name: bot.botName, openId: bot.botOpenId }, localeForBot(larkAppId), undefined, { larkAppId, chatId: task.chatId, whiteboardId: ds.session.whiteboardId, trustedCaller: scheduledTrustedCaller, promptInjection: sessionPromptInjection(ds) });
     // Compare-and-set registration (master): a concurrent creator/restore may
     // have claimed this anchor between the scratch cleanup above and here.
     // Refuse to overwrite the live occupant, retire THIS rejected candidate's
@@ -4467,6 +4469,7 @@ async function forkOrShowRepoCard(
       larkAppId,
       chatId: ds.chatId,
       whiteboardId: ds.session.whiteboardId,
+      promptInjection: sessionPromptInjection(ds),
       codexAppText: ds.pendingCodexAppText,
       codexAppApplicationContext: ds.pendingCodexAppApplicationContext,
       codexAppMessageContext: ds.pendingCodexAppMessageContext,

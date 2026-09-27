@@ -1,4 +1,5 @@
 import { zeroPromptInjectionForBot, sessionPromptInjection } from './prompt-injection.js';
+import { withLarkTurnIdempotency } from './lark-turn-idempotency.js';
 import * as sessionStore from '../services/session-store.js';
 import * as asyncTriggerStore from '../services/async-trigger-store.js';
 import * as idempotencyStore from '../services/idempotency-store.js';
@@ -48,6 +49,8 @@ export interface TriggerSessionDeps {
  * identity that participates in durable delivery reconciliation. */
 export interface TriggerSessionInternalOptions {
   stableTurnId?: string;
+  /** A loud idempotent relay must not be replayed by worker crash recovery. */
+  atMostOnce?: boolean;
   /** Synchronous write-ahead hook invoked immediately before worker IPC/fork.
    *  Durable receivers use it to persist DISPATCHED with the exact worker
    *  generation. Throwing aborts the dispatch. */
@@ -814,7 +817,7 @@ async function triggerSessionTurnAdmitted(
       if (oldest !== undefined) target.suppressedFinalOutputTurns.delete(oldest);
     }
   };
-  // Loud external triggers (no stableTurnId / no durable ledger) whose connector
+  // Loud external triggers (including keyed Lark relays) whose connector
   // opted into suppressFinalOutput. Unlike the durable path above this only drops
   // the trailing final_output — the streaming card / start notice still show. The
   // trigger turn id is stamped onto the fork so the worker echoes it back on
@@ -826,7 +829,7 @@ async function triggerSessionTurnAdmitted(
   // arming there would starve the HTTP caller until its timeout. The generic
   // /api/trigger endpoint accepts caller-supplied options without the webhook
   // route's filtering, so the guard belongs here rather than upstream.
-  const suppressLoudFinal = !stableTurnId
+  const suppressLoudFinal = (!stableTurnId || internal?.atMostOnce === true)
     && !req.options?.waitForFinalOutput
     && !req.options?.asyncReturnSessionId
     && req.options?.suppressFinalOutput === true;
@@ -1519,6 +1522,7 @@ async function triggerSessionTurnAdmitted(
       armLoudFinalSuppression(target);
       const accepted = sendWorkerInput(target, content, stableTurnId ? triggerId : loudTurnId, {
         ...(dispatchAttempt !== undefined ? { dispatchAttempt } : {}),
+        ...(internal?.atMostOnce ? { atMostOnce: true } : {}),
         ...(steerRequested ? { codexAppSteerable: true as const } : {}),
       });
       if (!accepted) {
@@ -1643,6 +1647,7 @@ async function triggerSessionTurnAdmitted(
     forkWorker(target, withSteer(content), {
       resume: target.hasHistory,
       turnId: triggerId,
+      ...(internal?.atMostOnce ? { atMostOnce: true } : {}),
       ...(dispatchAttempt !== undefined ? { dispatchAttempt } : {}),
     });
     return {
@@ -2198,7 +2203,27 @@ export async function triggerSessionTurn(
 ): Promise<TriggerResponse> {
   const result = await withBotTurnAdmission(
     deps.larkAppId,
-    () => triggerSessionTurnAdmitted(req, deps, internal),
+    () => {
+      if (!req.options?.turnIdempotencyKey || req.options.asyncReturnSessionId) {
+        return triggerSessionTurnAdmitted(req, deps, internal);
+      }
+      if (!req.target.sessionId || req.options.waitForFinalOutput || req.options.dryRun || internal) {
+        return Promise.resolve<TriggerResponse>({ ok: false, errorCode: 'bad_request', error: 'Lark turn idempotency requires an existing session without wait/dryRun/internal dispatch controls' });
+      }
+      const { turnIdempotencyKey: _key, ...options } = req.options;
+      return withLarkTurnIdempotency(req, deps.larkAppId, (triggerId, beforeDispatch) =>
+        triggerSessionTurnAdmitted({ ...req, options }, deps, {
+          stableTurnId: triggerId, atMostOnce: true,
+          beforeDispatch: () => {
+            beforeDispatch();
+            const target = activeBySessionId(deps.activeSessions, req.target.sessionId!);
+            if (target) {
+              inheritTriggerReplyAnchor(target, triggerId);
+              sessionStore.updateSession(target.session);
+            }
+          },
+        }));
+    },
   );
   // Echo the steer AUTHORIZATION at the single response chokepoint (the many
   // buildAsyncQueuedResponse sites stay untouched). Skip an idempotent REUSE:

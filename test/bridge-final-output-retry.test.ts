@@ -483,7 +483,8 @@ describe('Bridge final_output delivery (P2 retry)', () => {
     ds.scope = 'chat';
     ds.currentTurnId = 'turn-next';
     ds.currentReplyTarget = { mode: 'thread', rootMessageId: 'om_next', turnId: 'turn-next' } as any;
-    ds.initConfig = { promptInjection: 'none' } as any;
+    ds.session.promptInjection = 'none';
+    ds.initConfig = { promptInjection: 'default' } as any;
     const { __testOnly_deliverFinalOutput: deliver } = await import('../src/core/worker-pool.js');
     deliver(ds, finalOutputMsg(), 'tag', 0, undefined, () => true,
       { mode: 'thread', rootMessageId: 'om_original' });
@@ -492,7 +493,7 @@ describe('Bridge final_output delivery (P2 retry)', () => {
       turnId: 'turn-1', content: 'final answer', dispatchRoot: 'om_original',
     });
     expect(ds.lastBridgeEmittedUuid).toBe(SCOPED_DEDUPE_KEY);
-    ds.initConfig = { promptInjection: 'default' } as any;
+    ds.session.promptInjection = 'default';
     deliver(ds, { ...finalOutputMsg(), lastUuid: 'other', turnId: 'turn-next' }, 'tag', 0);
     await vi.advanceTimersByTimeAsync(2000);
     expect(onZeroPromptFinal).toHaveBeenCalledTimes(1);

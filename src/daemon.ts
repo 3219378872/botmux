@@ -17687,6 +17687,7 @@ function buildReservedInitialInput(
         ? undefined
         : (ds.pendingTurnId ?? ds.session.pendingRepoSetup?.turnId),
       sessionBackendType: ds.session.backendType,
+      promptInjection: sessionPromptInjection(ds),
       // transcript + solo（resolveSoloSessionForTurn 在注册会话后算好）：首轮去壳。
       solo: ds.soloSession,
       selfMention: { name: selfBot.botName, openId: selfBot.botOpenId },
@@ -17833,6 +17834,7 @@ function releaseQueuedActivationReservationNow(ds: DaemonSession, acknowledgedTo
         whiteboardId: ds.session.whiteboardId,
         codexAppText: rawCodexText || buffered.join('\n\n'),
         sessionBackendType: ds.session.backendType,
+        promptInjection: sessionPromptInjection(ds),
         turnId,
         solo: ds.soloSession,
         selfMention: { name: bot.botName, openId: bot.botOpenId },
@@ -19790,6 +19792,7 @@ async function dispatchApprovedCrossPrincipalSuggestion(
     chatId: ds.chatId,
     whiteboardId: ds.session.whiteboardId,
     sessionBackendType: ds.session.backendType,
+    promptInjection: sessionPromptInjection(ds),
     turnId,
   });
   cliInput.trustedCaller = { ...record.owner };
@@ -24435,6 +24438,7 @@ async function handleThreadReplyAdmitted(
           codexAppApplicationContext,
           codexAppMessageContext,
           sessionBackendType: ds.session.backendType,
+          promptInjection: sessionPromptInjection(ds),
           turnId: parsed.messageId,
         });
         // R5-B1-1: freeze the admission-time steer authorization onto this earliest
@@ -24575,6 +24579,7 @@ async function handleThreadReplyAdmitted(
           selfMention: { name: pendingBot.botName, openId: pendingBot.botOpenId },
           codexAppMessageContext,
         sessionBackendType: ds.session.backendType,
+        promptInjection: sessionPromptInjection(ds),
         turnId: parsed.messageId,
         });
         ds.session.queuedPrompt ??= ds.pendingPrompt;
@@ -25039,6 +25044,7 @@ async function handleThreadReplyAdmitted(
             // sendWorkerInput 的权威 turnId（parsed.messageId）一致，sidecar 可被 claim。
             turnId: parsed.messageId,
             sessionBackendType: ds.session.backendType,
+            promptInjection: sessionPromptInjection(ds),
             solo: ds.soloSession,
             selfMention: { name: selfBot.botName, openId: selfBot.botOpenId },
           },
@@ -25060,6 +25066,7 @@ async function handleThreadReplyAdmitted(
           solo: ds.soloSession,
           selfMention: { name: selfBot.botName, openId: selfBot.botOpenId },
         sessionBackendType: ds.session.backendType,
+        promptInjection: sessionPromptInjection(ds),
         turnId: parsed.messageId,
         });
     await noteTurnReceived(ds, parsed.messageId, parsed.content, turnSender, parsed.messageId, substituteTrigger ? SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE : undefined);
@@ -25243,6 +25250,7 @@ async function handleThreadReplyAdmitted(
             codexAppApplicationContext,
             codexAppMessageContext,
             sessionBackendType: ds.session.backendType,
+            promptInjection: sessionPromptInjection(ds),
             turnId: parsed.messageId,
           });
           // R4-B1: freeze the admission-time steer authorization onto the queued
@@ -25396,6 +25404,7 @@ async function handleThreadReplyAdmitted(
           // queued dashboard 场景的 turnId 是合成的，权威流不同，保持 inline。
           turnId: queuedHasDurableTail ? undefined : parsed.messageId,
           sessionBackendType: ds.session.backendType,
+          promptInjection: sessionPromptInjection(ds),
         },
       );
     } else {

@@ -2151,6 +2151,10 @@ function persistRow(session: Session): void {
   const existing = ownStore.selectRow.get(session.sessionId) as { row: string } | undefined;
   if (existing) {
     const durable = JSON.parse(existing.row) as Session;
+    // Pre-migration whole-row writers must not erase the frozen input policy.
+    if (session.promptInjection === undefined && durable.promptInjection !== undefined) {
+      session = { ...session, promptInjection: durable.promptInjection };
+    }
     if (durable.cliInstanceBinding) {
       if (session.cliInstanceBinding && JSON.stringify(session.cliInstanceBinding) !== JSON.stringify(durable.cliInstanceBinding)) {
         throw new Error('Codex instance binding is immutable');

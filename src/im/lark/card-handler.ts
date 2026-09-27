@@ -3,6 +3,7 @@
  * from Feishu interactive cards.
  * Extracted from daemon.ts for modularity.
  */
+import { sessionPromptInjection } from '../../core/prompt-injection.js';
 import { execSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { basename as pathBasename, dirname, join } from 'node:path';
@@ -641,6 +642,7 @@ export async function commitRepoSelection(
                 ? undefined
                 : (ds.pendingTurnId ?? ds.session.pendingRepoSetup?.turnId),
               sessionBackendType: ds.session.backendType,
+              promptInjection: sessionPromptInjection(ds),
             },
           )
         : undefined;
@@ -1938,6 +1940,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       chatId: ds.chatId,
       whiteboardId: ds.session.whiteboardId,
       sessionBackendType: ds.session.backendType,
+      promptInjection: sessionPromptInjection(ds),
       turnId,
     });
     let accepted = false;
