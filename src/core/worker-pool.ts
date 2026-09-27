@@ -2624,6 +2624,38 @@ function daemonCardFooterRecipientOpenId(ds: DaemonSession, effectiveCliId?: str
   }
 }
 
+interface ZeroPromptFinalInitiator {
+  openId: string;
+  isBot: boolean;
+}
+
+/** Zero-injection workers cannot be instructed to choose --mention-back.
+ * Address the exact inbound sender, including bots, without borrowing a newer
+ * turn's single slot or the session owner. Capture before any delivery await. */
+function zeroPromptFinalInitiator(
+  ds: DaemonSession,
+  msg: Extract<WorkerToDaemon, { type: 'final_output' }>,
+): ZeroPromptFinalInitiator | null {
+  const turnId = msg.replyTurnId ?? msg.turnId;
+  const reply = pickTurnReplyTarget(ds.session, turnId);
+  const frozen = ds.session.turnReplyContexts?.[turnId];
+  const ledger = msg.codexAppSettlement
+    ? ds.session.codexAppDispatchLedger?.find(entry => entry.dispatchId === msg.codexAppSettlement!.dispatchId
+      && entry.turnId === msg.turnId)
+    : undefined;
+  const openId = ledger?.replyTargetSenderOpenId ?? reply?.senderOpenId ?? frozen?.replyTargetSenderOpenId;
+  if (!openId?.startsWith('ou_') || openId === getBot(ds.larkAppId).botOpenId) return null;
+  const botFlag = ledger?.replyTargetSenderOpenId === openId ? ledger.replyTargetSenderIsBot
+    : frozen?.replyTargetSenderOpenId === openId ? frozen.replyTargetSenderIsBot
+      : undefined;
+  const isBot = botFlag ?? reply?.participants?.find(p => p.openId === openId)?.isBot
+    ?? (ds.session.quoteTargetId === turnId && ds.session.quoteTargetSenderOpenId === openId
+      ? ds.session.quoteTargetSenderIsBot : undefined);
+  if (isBot !== undefined) return { openId, isBot };
+  try { return { openId, isBot: loadKnownBotOpenIdsForApp(ds.larkAppId).has(openId) }; }
+  catch { return { openId, isBot: false }; }
+}
+
 /** 失败兜底卡片（turnFailed final_output）的兜底 @ 对象。仅当会话没有任何真人
  *  footer 收件人时使用（典型：bot-to-bot 派发的 ownerless 会话遇到模型网关故障，
  *  没人被 @，故障静默滑过）——回退到 bot 管理员（首个已授权真人 open_id，与
@@ -16514,6 +16546,7 @@ function deliverFinalOutput(
   isStillOwned: () => boolean = () => true,
   frozenReplyTarget?: FrozenSessionReplyTarget,
   frozenUsage?: CardUsageSnapshot,
+  frozenInitiator?: ZeroPromptFinalInitiator | null,
 ): void {
   if (!isStillOwned()) {
     onComplete?.(false);
@@ -16521,6 +16554,10 @@ function deliverFinalOutput(
   }
   let cardUsage = frozenUsage;
   const managedReceiver = !!ds.session.vcMeetingReceiver;
+  const zeroPromptReply = !managedReceiver && (!msg.kind || msg.kind === 'bridge')
+    && sessionPromptInjection(ds) === 'none';
+  const initiator = frozenInitiator !== undefined ? frozenInitiator
+    : zeroPromptReply ? zeroPromptFinalInitiator(ds, msg) : null;
   // Wait Mode / HTTP Sync Override:
   // If this turn is being waited for by an HTTP webhook request, intercept the
   // output, resolve the Promise immediately, and DO NOT send it to Lark.
@@ -16776,7 +16813,7 @@ function deliverFinalOutput(
       const recipientOpenId = managedReceiver
         ? undefined
         : imOrigin?.replyTargetSenderOpenId
-          ?? daemonCardFooterRecipientOpenId(ds, effectiveCliId);
+          ?? (zeroPromptReply ? initiator?.openId : daemonCardFooterRecipientOpenId(ds, effectiveCliId));
       // 失败兜底通知正文 @ 真人。有 footer 收件人（真人 owner / 触发者）时其 <at>
       // 已经会提醒，不重复；仅当没有任何真人收件人时（bot-to-bot 派发的会话）回退
       // @ bot 管理员，让模型网关类故障有人看见而不是静默滑过。
@@ -17036,7 +17073,9 @@ function deliverFinalOutput(
         finishVcMeetingImReply(config.session.dataDir, preparedListenerReply.ref, messageId);
       }
       if (!managedReceiver && (!msg.kind || msg.kind === 'bridge')
-        && sessionPromptInjection(ds) === 'none') {
+        && sessionPromptInjection(ds) === 'none' && !(initiator?.isBot && !explicit)) {
+        // A real @ already returns this result to the initiating bot. Do not
+        // also inject an HTTP report and make it process the same result twice.
         // Reporting is a separate sink. Its bounded retries must not resend
         // the already-delivered card or delay this sub-session's settlement.
         const report = cb.onZeroPromptFinal;
@@ -17102,7 +17141,7 @@ function deliverFinalOutput(
         return;
       }
       logger.warn(`[${t}] Bridge final_output attempt ${next} failed (${err.message}); retrying in ${FINAL_OUTPUT_RETRY_BACKOFF_MS[next]}ms`);
-      deliverFinalOutput(ds, msg, t, next, onComplete, isStillOwned, frozenReplyTarget, cardUsage);
+      deliverFinalOutput(ds, msg, t, next, onComplete, isStillOwned, frozenReplyTarget, cardUsage, initiator);
     }
   }, FINAL_OUTPUT_RETRY_BACKOFF_MS[attempt] ?? 0);
 }
