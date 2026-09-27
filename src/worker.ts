@@ -2316,6 +2316,18 @@ let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
 function replyDeliveryMode(): 'send' | 'transcript' {
   return lastInitConfig?.replyDelivery === 'transcript' ? 'transcript' : 'send';
 }
+
+function zeroPromptTerminalSync(): boolean {
+  return lastInitConfig?.promptInjection === 'none' && !lastInitConfig.adoptMode
+    && !lastInitConfig.apiOnly;
+}
+
+function notifyTerminalTurnStarted(turn: { turnId: string; markTimeMs?: number; replyContextTurnId?: string }): void {
+  if (zeroPromptTerminalSync()) {
+    send({ type: 'terminal_turn_started', turnId: turn.turnId, startedAtMs: turn.markTimeMs ?? Date.now(),
+      ...(turn.replyContextTurnId ? { replyContextTurnId: turn.replyContextTurnId } : {}) });
+  }
+}
 let closeRequested = false;
 /** Dashboard「复现命令」：session 冷启时最终交给 backend.spawn 的真实调用
  *  （bin + argv + cwd + 关键 env）。原样保留，worker `ready` 时随消息上报给 daemon
@@ -4711,7 +4723,7 @@ let bridgeStalePidStateSessionId: string | undefined;
 const bridgeSecondaryPaths = new Map<string, number>(); // path → offset
 let bridgeOffset = 0;
 let bridgePendingTail = '';
-const bridgeQueue = new BridgeTurnQueue();
+const bridgeQueue = new BridgeTurnQueue(notifyTerminalTurnStarted);
 /** Counts background Agent/Task dispatches whose completion notification has
  *  not yet arrived. Consulted at the PTY idle edge (markPromptReady): a main
  *  turn that only went quiet because it is awaiting a background sub-agent must
@@ -4905,7 +4917,7 @@ let codexBridgePendingTail = '';
 let codexBridgeBaselineDone = false;
 let publishedActiveRuntime: TraexRuntimeSnapshot = {};
 let activeRuntimePublished = false;
-const codexBridgeQueue = new CodexBridgeQueue();
+const codexBridgeQueue = new CodexBridgeQueue(Date.now, notifyTerminalTurnStarted);
 // Structured rollout CoT: Codex response items and TraeX history mutations emit
 // rollout reasoning/tool events attributed to the collecting turn, feeding
 // the same thinking channel as Claude's transcript attribution. Other
@@ -6493,7 +6505,7 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     // provider error through transcript fallback (regardless of send markers).
     if (turn.terminalOutcome && turn.terminalOutcome.status !== 'completed') continue;
     const nextBoundaryMs = (i + 1 < ready.length ? ready[i + 1].markTimeMs : nextPendingMarkTimeMs);
-    if (turn.isLocal && shouldSuppressBridgeEmit({ markTimeMs: turn.markTimeMs, isLocal: turn.isLocal }, nextBoundaryMs, markers, adoptMode, replyDeliveryMode())) {
+    if (turn.isLocal && !zeroPromptTerminalSync() && shouldSuppressBridgeEmit({ markTimeMs: turn.markTimeMs, isLocal: turn.isLocal }, nextBoundaryMs, markers, adoptMode, replyDeliveryMode())) {
       const reason = turn.isLocal ? 'local-typed' : 'model called botmux send within window';
       log(`Bridge fallback suppressed for turn ${turn.turnId.substring(0, 8)} (${reason})`);
       continue;
@@ -6518,7 +6530,8 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     if (assistantText.length === 0) continue;
     const lastUuid = turn.assistantUuids[turn.assistantUuids.length - 1];
 
-    const gateInput = { markTimeMs: turn.markTimeMs, isLocal: turn.isLocal, finalText: assistantText };
+    const gateInput = { markTimeMs: turn.markTimeMs, isLocal: turn.isLocal, finalText: assistantText,
+      forwardLocalFinal: zeroPromptTerminalSync() };
     notifyExplicitRepliesObserved(
       turn.turnId,
       attributableExplicitReplyMarkersForTurnWindow(
@@ -6556,7 +6569,7 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     const postText = bridgePostText(assistantText, adoptMode);
     if (!adoptMode && postText.trim().length === 0) continue;
 
-    if (turn.isLocal) {
+    if (turn.isLocal && !zeroPromptTerminalSync()) {
       if (turn.userUuid) {
         // Local turn (adopt mode only): also surface the user prompt so the
         // Lark thread shows both sides of the exchange. User text comes from
@@ -6613,6 +6626,7 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
       content: deliveredText,
       lastUuid,
       turnId: turn.turnId,
+      ...(turn.isLocal && zeroPromptTerminalSync() ? { terminalLocal: true } : {}),
       ...(turn.dispatchAttempt !== undefined ? { dispatchAttempt: turn.dispatchAttempt } : {}),
     });
   }
@@ -8218,12 +8232,13 @@ function emitReadyCodexTurns(): void {
     // no pending Lark fingerprint and must be forwarded like terminal
     // `/adopt`, including both the App prompt and its final reply.
     const adoptMode = terminalAdoptMode
-      || (sharedAppServerBridge && turn.isLocal === true);
+      || (sharedAppServerBridge && turn.isLocal === true && !zeroPromptTerminalSync());
     const sourceHermesSessionId = structuredBridgeIsHermes() ? turn.sourceSessionId : undefined;
     const nextBoundaryMs = (i + 1 < ready.length ? ready[i + 1].markTimeMs : nextPendingMarkTimeMs);
     const gateInput = {
       markTimeMs: turn.markTimeMs,
       isLocal: turn.isLocal,
+      forwardLocalFinal: zeroPromptTerminalSync(),
       finalText: turn.finalText,
       terminalStatus: turn.terminalStatus,
       terminalErrorCode: turn.terminalErrorCode,
@@ -8292,7 +8307,7 @@ function emitReadyCodexTurns(): void {
     // already refuses to interpret the sentinel under adoptMode.
     const postContent = bridgePostText(content, adoptMode);
     if (!adoptMode && postContent.trim().length === 0) continue;
-    if (turn.isLocal) {
+    if (turn.isLocal && !zeroPromptTerminalSync()) {
       // Local turn (adopt only): user typed in iTerm. Surface both sides
       // so the Lark thread sees a complete exchange instead of an orphan
       // reply. formatLocalTurnFields caps both texts to keep within
@@ -8321,6 +8336,7 @@ function emitReadyCodexTurns(): void {
       content: postContent,
       lastUuid: turn.turnId,
       turnId: turn.turnId,
+      ...(turn.isLocal && zeroPromptTerminalSync() ? { terminalLocal: true } : {}),
       ...(turn.dispatchAttempt !== undefined ? { dispatchAttempt: turn.dispatchAttempt } : {}),
       // Failure-fallback notice (not a model answer): lets the daemon add a
       // human @mention so e.g. a model-gateway outage doesn't scroll by
@@ -17276,6 +17292,9 @@ async function spawnCli(
   // Mode uses effectiveResume: when the resume probe flipped us to FRESH, we
   // must NOT baseline the "restored" cursor against an empty / absent store
   // (would otherwise swallow the fresh session's first turn).
+  if (zeroPromptTerminalSync()) {
+    codexBridgeQueue.setLocalTurns(true, Date.now());
+  }
   if (cfg.cliId === 'hermes') {
     hermesBridgeAttach(effectiveResume ? 'baseline-existing' : 'fresh-empty');
   } else if (cfg.cliId === 'codex') {

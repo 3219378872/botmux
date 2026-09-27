@@ -1938,6 +1938,80 @@ describe('Bridge final_output delivery (P2 retry)', () => {
   });
 
   it.each(['claude-code', 'codex', 'hermes'] as const)(
+    'zero-prompt %s terminal finals inherit the initiator at start and use fresh normal cards through retries', async cliId => {
+      const sessionReply = vi.fn().mockRejectedValueOnce(new Error('network error')).mockResolvedValue('om_reply');
+      const onZeroPromptFinal = vi.fn(async () => {});
+      initWorkerPool({ sessionReply, onZeroPromptFinal, getSessionWorkingDir: () => '/tmp', getActiveCount: () => 1, closeSession: vi.fn() });
+      const ds = makeDs();
+      ds.adoptedFrom = undefined;
+      ds.scope = 'chat';
+      ds.session.cliId = cliId;
+      ds.session.promptInjection = 'none';
+      ds.session.quoteTargetId = 'om_original';
+      ds.session.quoteTargetSenderOpenId = 'ou_initiator';
+      ds.session.quoteTargetSenderIsBot = true;
+      ds.session.turnReplyContexts = { om_original: {
+        target: { mode: 'thread', rootMessageId: 'om_original_topic' },
+        replyTargetSenderOpenId: 'ou_initiator', replyTargetSenderIsBot: true,
+      } };
+      __testOnly_setupWorkerHandlers(ds, ds.worker as any);
+      ds.worker!.emit('message', { type: 'terminal_turn_started', turnId: 'local-native-1', startedAtMs: Date.now() });
+      ds.session.quoteTargetId = 'om_new';
+      ds.session.quoteTargetSenderOpenId = 'ou_later';
+      ds.session.turnReplyContexts.om_new = {
+        target: { mode: 'quote', rootMessageId: 'om_new_topic' },
+        replyTargetSenderOpenId: 'ou_later', replyTargetSenderIsBot: true,
+      };
+      ds.worker!.emit('message', {
+        ...finalOutputMsg(), sessionId: ds.session.sessionId, turnId: 'local-native-1',
+        terminalLocal: true, content: 'Recovered review final',
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      // The in-flight attempt owns its frozen address even if bounded records
+      // are pruned before the retry.
+      delete ds.session.turnReplyContexts['local-native-1'];
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(sessionReply).toHaveBeenCalledTimes(2);
+      for (const call of sessionReply.mock.calls) {
+        const card = String(call[1]);
+        expect(card).toContain('Recovered review final');
+        expect(card).toContain('<at id=ou_initiator></at>');
+        expect(card).not.toContain('ou_later');
+        expect(card).not.toMatch(/终端本地对话|来自终端/);
+        expect(call[5]).toMatchObject({ replyTarget: { mode: 'thread', rootMessageId: 'om_original_topic' } });
+      }
+      expect(sessionReply.mock.calls[0][5].uuid).toBe(sessionReply.mock.calls[1][5].uuid);
+      expect(updateMessageMock).not.toHaveBeenCalled();
+      expect(onZeroPromptFinal).not.toHaveBeenCalled();
+      ds.worker!.emit('message', { type: 'terminal_turn_started', turnId: 'local-native-2', startedAtMs: Date.now() });
+      ds.worker!.emit('message', {
+        ...finalOutputMsg(), sessionId: ds.session.sessionId, turnId: 'local-native-2',
+        lastUuid: 'uuid-2', terminalLocal: true, content: 'Next terminal final',
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(sessionReply).toHaveBeenCalledTimes(3);
+      expect(String(sessionReply.mock.calls[2][1])).toContain('<at id=ou_later></at>');
+      expect(sessionReply.mock.calls[2][5]).toMatchObject({ replyTarget: { mode: 'quote', rootMessageId: 'om_new_topic' } });
+    },
+  );
+
+  it('does not enable terminal final forwarding in ordinary or adopted sessions', async () => {
+    const sessionReply = vi.fn(async () => 'om_reply');
+    initWorkerPool({ sessionReply, getSessionWorkingDir: () => '/tmp', getActiveCount: () => 1, closeSession: vi.fn() });
+    for (const zero of [false, true]) {
+      const ds = makeDs();
+      if (zero) ds.session.promptInjection = 'none';
+      else ds.adoptedFrom = undefined;
+      __testOnly_setupWorkerHandlers(ds, ds.worker as any);
+      ds.worker!.emit('message', { type: 'terminal_turn_started', turnId: 'local-native', startedAtMs: Date.now() });
+      ds.worker!.emit('message', { ...finalOutputMsg(), turnId: 'local-native', terminalLocal: true });
+      expect(ds.session.turnReplyContexts?.['local-native']).toBeUndefined();
+    }
+    await vi.advanceTimersByTimeAsync(10);
+    expect(sessionReply).not.toHaveBeenCalled();
+  });
+
+  it.each(['claude-code', 'codex', 'hermes'] as const)(
     'zero-injection %s finals @ the exact initiating bot once without an extra HTTP report', async cliId => {
       const sessionReply = vi.fn(async () => 'om_reply');
       const onZeroPromptFinal = vi.fn(async () => {});

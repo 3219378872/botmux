@@ -94,6 +94,7 @@ import { getSessionUsageSnapshot } from './cost-calculator.js';
 import { renderBrandTemplate } from '../im/lark/brand-template.js';
 import { handleCotThinkingUpdate, finalizeCotMessage, abortCotMessage } from '../im/lark/cot-message.js';
 import { replyCardModeFor, updateTurnReplyCard, queueTurnReplyTools, flushTurnReplyTools, settleTurnReplyCards } from './turn-reply-card.js';
+import { captureTerminalReplyContext } from './terminal-reply-context.js';
 import { ReplyCardWithdrawnError } from '../services/turn-reply-card.js';
 import { replyToDocComment, chunkCommentText, unsubscribeDocFile, removeCommentReaction } from '../im/lark/doc-comment.js';
 import { listDocSubscriptionsForSession, removeDocSubscription } from '../services/doc-subs-store.js';
@@ -12838,6 +12839,15 @@ function setupWorkerHandlers(
     }
     const effectiveCliId = sessionCliId(ds, botCfg);
     switch (msg.type) {
+      case 'terminal_turn_started': {
+        if (sessionPromptInjection(ds) !== 'none' || ds.adoptedFrom || ds.session.adoptedFrom
+          || ds.session.vcMeetingReceiver || !ds.chatId.startsWith('oc_')
+          || !Number.isFinite(msg.startedAtMs)) break;
+        if (captureTerminalReplyContext(ds, msg.turnId, msg.startedAtMs, msg.replyContextTurnId)) {
+          sessionStore.updateSession(ds.session);
+        }
+        break;
+      }
       case 'worker_ipc_ready':
         // Consumed by the standalone bootstrap listener installed at spawn.
         break;
@@ -16556,6 +16566,16 @@ function deliverFinalOutput(
   const managedReceiver = !!ds.session.vcMeetingReceiver;
   const zeroPromptReply = !managedReceiver && (!msg.kind || msg.kind === 'bridge')
     && sessionPromptInjection(ds) === 'none';
+  if (msg.terminalLocal) {
+    const terminalContext = ds.session.turnReplyContexts?.[msg.turnId];
+    // Never reinterpret an unbound local output as an IM/HTTP completion.
+    if (!zeroPromptReply || ds.adoptedFrom || ds.session.adoptedFrom
+      || !ds.chatId.startsWith('oc_') || (!frozenReplyTarget && !terminalContext)) {
+      onComplete?.(true);
+      return;
+    }
+    if (terminalContext) frozenReplyTarget ??= { ...terminalContext.target };
+  }
   const initiator = frozenInitiator !== undefined ? frozenInitiator
     : zeroPromptReply ? zeroPromptFinalInitiator(ds, msg) : null;
   // Wait Mode / HTTP Sync Override:

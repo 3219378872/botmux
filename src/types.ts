@@ -1885,6 +1885,9 @@ export type WorkerToDaemon =
    * CLI input queue. The daemon persists a root-bound receipt only after this
    * acknowledgement; IPC arrival alone is not acceptance. */
   | { type: 'turn_input_committed'; turnId: string }
+  /** A live native terminal turn in a zero-injection session. Freeze its
+   * reply destination before newer IM inputs can replace the sender. */
+  | { type: 'terminal_turn_started'; turnId: string; startedAtMs: number; replyContextTurnId?: string }
   /** Transport-only receipt for ordinary Lark IM delivery. Emitted
    * synchronously when the live worker's IPC handler claims the exact turn,
    * before slow startup work; input-queue ownership is acknowledged separately
@@ -2046,6 +2049,9 @@ export type WorkerToDaemon =
       lastUuid: string;
       turnId: string;
       replyTurnId?: string;
+      /** Zero-injection terminal input uses normal final rendering, with the
+       * reply context captured by terminal_turn_started. */
+      terminalLocal?: boolean;
       /** Measured native execution time for this exact turn/attempt, excluding queueing. */
       durationMs?: number;
       /** Literal CLI input time, from the same execution window as durationMs. */
