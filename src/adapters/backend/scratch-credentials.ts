@@ -24,7 +24,7 @@
  */
 import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir as osHomedir } from 'node:os';
 import { resolveLarkCliLinuxStoreDir } from '../cli/fs-policy.js';
 
 export interface ScratchSecretInput {
@@ -34,6 +34,10 @@ export interface ScratchSecretInput {
   dataDirs: readonly string[];
   /** Resolved loaded BOTS_CONFIG path (may live outside any botmux home). */
   botsConfigPath?: string;
+  /** OS user home, used to locate lark-cli keystores. Defaults to the real
+   *  homedir(); probes/tests MUST pass an isolated temp home so enumeration
+   *  never reads or writes the operator's real ~/.local/share/lark-cli. */
+  homeDir?: string;
   /** Current session id, for the cli-identity per-session carve-out: the
    *  whole cli-identity/ directory is sealed (it holds every concurrent
    *  session's plaintext trigger-user tokens), but THIS session's own
@@ -72,6 +76,7 @@ function isDir(p: string): boolean {
 export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchSecrets {
   const out = new Set<string>();
   const readOnlyCarve = new Set<string>();
+  const homeDir = input.homeDir || osHomedir();
   const addFile = (p: string | undefined): void => {
     if (p && isFileOrLink(p)) out.add(p);
   };
@@ -163,8 +168,8 @@ export function enumerateScratchSecretPaths(input: ScratchSecretInput): ScratchS
   // ones are dropped. (macOS uses ~/Library/Application Support/lark-cli,
   // handled by the darwin module's authority-root seal.)
   const larkStoreCandidates = new Set<string>([
-    join(homedir(), '.lark-cli'),
-    resolveLarkCliLinuxStoreDir(process.env.LARKSUITE_CLI_DATA_DIR, homedir()),
+    join(homeDir, '.lark-cli'),
+    resolveLarkCliLinuxStoreDir(process.env.LARKSUITE_CLI_DATA_DIR, homeDir),
   ]);
   for (const p of larkStoreCandidates) {
     if (existsSync(p)) out.add(p);

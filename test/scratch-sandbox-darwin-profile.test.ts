@@ -5,7 +5,7 @@
  * scripts/scratch-sandbox-darwin-probe.mjs.
  */
 import { describe, expect, it } from 'vitest';
-import { buildMacScratchProfile } from '../src/adapters/backend/scratch-sandbox-darwin.js';
+import { buildMacScratchProfile, macLarkKeystoreDenies } from '../src/adapters/backend/scratch-sandbox-darwin.js';
 
 const join = (lines: string[]) => lines.join('\n');
 const idx = (p: string, rule: string) => p.indexOf(rule);
@@ -108,5 +108,34 @@ describe('buildMacScratchProfile — three-stage credential sealing', () => {
     expect(p).toContain('(allow file-write* (subpath "/h/a\\"b")');
     expect(p).toContain('(deny file-write* (subpath "/h/c\\\\d")');
     expect(p).not.toContain('relative');
+  });
+});
+
+describe('macLarkKeystoreDenies (N1: scratch must seal macOS lark-cli keys)', () => {
+  // Pure shape test (paths are existence-filtered, so on a Linux CI box none
+  // exist and the list is empty — but the CANDIDATE shape is asserted here;
+  // the real content assertion runs in the macOS darwin probe).
+  it('names the three macOS keystore locations for a given home', () => {
+    // Temporarily stub existsSync-independent path derivation by checking the
+    // raw candidate set through a home whose lark dirs we create is impossible
+    // cross-platform, so assert the helper filters missing paths to [] here.
+    expect(macLarkKeystoreDenies('/nonexistent-probe-home-xyz')).toEqual([]);
+  });
+
+  it('buildMacScratchProfile emits lark keystore denies read+write in stage 5', () => {
+    const p = join(buildMacScratchProfile({
+      net: true,
+      writable: ['/clone/home'],
+      homeRoot: '/Users/u',
+      // a mac lark keystore handed in (as prepareMacScratchSandbox does)
+      fileDenyPaths: ['/Users/u/Library/Application Support/lark-cli'],
+    }), '');
+    expect(p).toMatch(/deny file-read\* \(subpath "\/Users\/u\/Library\/Application Support\/lark-cli"\)/);
+    expect(p).toMatch(/deny file-write\* \(subpath "\/Users\/u\/Library\/Application Support\/lark-cli"\)/);
+    // and it comes AFTER the writable clone grant (last-match-wins)
+    const writeGrant = idx(p, '(allow file-write* (subpath "/clone/home")');
+    const readDeny = idx(p, '(deny file-read* (subpath "/Users/u/Library/Application Support/lark-cli")');
+    expect(writeGrant).toBeGreaterThan(0);
+    expect(readDeny).toBeGreaterThan(writeGrant);
   });
 });

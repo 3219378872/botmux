@@ -97,6 +97,9 @@ export type BotDefaultsRow = {
   /** Tri-state sandbox selection ('off' absent historically → derive from sandbox). */
   sandboxMode?: 'off' | 'oncall' | 'scratch' | null;
   scratchStorage?: 'tmpfs' | 'disk' | null;
+  /** Whether the tmpfs/disk storage segmented control applies (Linux only;
+   *  macOS scratch is always APFS-clonefile backed). */
+  scratchStorageSelectable?: boolean;
   scratchTmpfsSizeMb?: number | null;
   scratchDenyPaths?: string[] | null;
   /** Whether the scratch mode is available on this platform (Linux only). */

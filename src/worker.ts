@@ -16856,6 +16856,7 @@ async function spawnCli(
       botmuxHomes: [...new Set([defaultBotmuxHome, configuredBotmuxHome])].map(scratchCanonical),
       dataDirs: [scratchDataDir].map(scratchCanonical),
       botsConfigPath: cfg.loadedBotsConfigPath ? scratchCanonical(cfg.loadedBotsConfigPath) : undefined,
+      homeDir: scratchHome,
       sessionId: cfg.sessionId,
     });
     const scratchDeny = [...new Set<string>([

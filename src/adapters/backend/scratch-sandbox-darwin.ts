@@ -165,6 +165,20 @@ function escSb(p: string): string {
  *  4. mcp socket literal grants
  *  5. fileDenyPaths — file/subtree credential denies + symlink-degraded
  *     subtree write-denies + user denies, emitted LAST so they always win. */
+/** macOS lark-cli keystore absolute paths that must be read+write denied
+ *  inside scratch (the shared master.key + every appsecret_*.enc, and the
+ *  per-bot lark-cli config). These live OUTSIDE ~/.botmux so the authority-
+ *  root seal does not cover them; the Linux enumerator resolves different
+ *  (~/.local/share) paths, hence the platform-specific helper. Only paths
+ *  that exist are returned (the Seatbelt compiler/prepare filters anyway). */
+export function macLarkKeystoreDenies(homeReal: string): string[] {
+  return [
+    join(homeReal, 'Library', 'Application Support', 'lark-cli'),
+    join(homeReal, '.lark-cli'),
+    join(homeReal, '.lark-cli-bots'),
+  ].filter(p => existsSync(p));
+}
+
 export function buildMacScratchProfile(input: {
   /** Scratch trees granted read+write (clone trees, session tmp/outbox/shim). */
   writable: readonly string[];
@@ -516,13 +530,19 @@ export function prepareMacScratchSandbox(opts: PrepareMacScratchOpts): MacScratc
     .filter(p => !p.startsWith(sessionRoot + sep) && p !== sessionRoot)
     .filter(p => ![...authorityRoots].some(root => p === root || p.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)));
 
+  // macOS lark-cli keystores. These are NOT under ~/.botmux and the shared
+  // enumerator only resolves Linux store paths, so the mac module must seal
+  // them itself: the shared keychain (master.key + every app's appsecret_*.enc)
+  // and the per-bot lark-cli config. Read+write denied in stage 5.
+  const macLarkDenies = macLarkKeystoreDenies(homeReal);
+
   const profilePath = join(sessionRoot, 'scratch.sb');
   const lines = buildMacScratchProfile({
     net: opts.net !== false,
     authorityRootDenies: [...authorityRoots].sort((a, b) => b.length - a.length),
     writable: [homeCloneRoot, workCloneRoot, tmp, outbox, shimBin],
     hostWritable,
-    fileDenyPaths: [...new Set([...callerFileDenies])],
+    fileDenyPaths: [...new Set([...callerFileDenies, ...macLarkDenies])],
     fileWriteDenyPaths: [...degradedWriteDeny, claudeMcpCache]
       .filter(p => !authorityRoots.has(p)),
     mcpSocket: sandboxMcpSocket,

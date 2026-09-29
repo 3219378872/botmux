@@ -1123,6 +1123,16 @@ describe('migrateLegacySandboxFields', () => {
     expect(migrateLegacySandboxFields({ readIsolation: true })).toEqual({ sandbox: true });
   });
 
+  it('preserves the scratch string even when legacy path fields trigger migration', () => {
+    // A scratch bot that also carries a stale legacy hide path must NOT be
+    // downgraded to boolean true (oncall) by the migration (PR #1513 review).
+    const m = migrateLegacySandboxFields({ sandbox: 'scratch', sandboxHidePaths: ['~/.ssh'] });
+    expect(m?.sandbox).toBe('scratch');
+    expect(m?.sandboxPaths?.deny).toEqual(['~/.ssh']);
+    // a plain scratch bot with no legacy fields still no-ops
+    expect(migrateLegacySandboxFields({ sandbox: 'scratch' })).toBeNull();
+  });
+
   it('no-ops when already migrated or nothing legacy present', () => {
     expect(migrateLegacySandboxFields({ sandbox: true, sandboxPaths: {} })).toBeNull();
     expect(migrateLegacySandboxFields({ sandbox: true })).toBeNull();

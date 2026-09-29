@@ -3918,26 +3918,30 @@ function SandboxSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
       {selected === 'scratch' ? (
         <div className="bd-scratch-opts">
           <p className="bd-section-note bd-warn">{tr('botDefaults.sandboxScratchWarning')}</p>
-          <div className="bd-seg" role="group" aria-label={tr('botDefaults.sandboxScratchStorage')}>
-            <button
-              type="button"
-              className={`bd-seg-btn${storage === 'tmpfs' ? ' bd-seg-btn-active' : ''}`}
-              data-action="scratch-storage-tmpfs"
-              disabled={busy}
-              onClick={() => void save('scratch', 'tmpfs')}
-            >
-              {tr('botDefaults.sandboxScratchTmpfs')}
-            </button>
-            <button
-              type="button"
-              className={`bd-seg-btn${storage === 'disk' ? ' bd-seg-btn-active' : ''}`}
-              data-action="scratch-storage-disk"
-              disabled={busy}
-              onClick={() => void save('scratch', 'disk')}
-            >
-              {tr('botDefaults.sandboxScratchDisk')}
-            </button>
-          </div>
+          {bot.scratchStorageSelectable === false ? (
+            <p className="bd-section-note">{tr('botDefaults.sandboxScratchStorageMacNote')}</p>
+          ) : (
+            <div className="bd-seg" role="group" aria-label={tr('botDefaults.sandboxScratchStorage')}>
+              <button
+                type="button"
+                className={`bd-seg-btn${storage === 'tmpfs' ? ' bd-seg-btn-active' : ''}`}
+                data-action="scratch-storage-tmpfs"
+                disabled={busy}
+                onClick={() => void save('scratch', 'tmpfs')}
+              >
+                {tr('botDefaults.sandboxScratchTmpfs')}
+              </button>
+              <button
+                type="button"
+                className={`bd-seg-btn${storage === 'disk' ? ' bd-seg-btn-active' : ''}`}
+                data-action="scratch-storage-disk"
+                disabled={busy}
+                onClick={() => void save('scratch', 'disk')}
+              >
+                {tr('botDefaults.sandboxScratchDisk')}
+              </button>
+            </div>
+          )}
         </div>
       ) : null}
       <div className="actions">

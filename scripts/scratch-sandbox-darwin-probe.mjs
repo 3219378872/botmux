@@ -97,6 +97,16 @@ try {
   // 6. reads work through the farm
   const rRead = run('ls "$HOME" >/dev/null && echo READ_OK');
   check('reads work through the farm', rRead.stdout.includes('READ_OK'));
+
+  // 7. macOS lark-cli keystores are sealed (N1). Read-only assertion — never
+  //    writes the real keystore; only verifies a pre-existing master.key is
+  //    not readable from inside the sandbox. Skipped when absent (fresh mac).
+  for (const rel of ['Library/Application Support/lark-cli/master.key', '.lark-cli/config.json']) {
+    const hostPath = join(homedir(), rel);
+    if (!existsSync(hostPath)) continue;
+    const out = run(`if [ -f "$HOME/${rel}" ]; then if cat "$HOME/${rel}" >/dev/null 2>&1; then echo LEAKED; else echo SEALED; fi; else echo ABSENT; fi`);
+    check(`mac lark keystore sealed: ${rel}`, out.stdout.includes('SEALED') || out.stdout.includes('ABSENT'), out.stdout.trim().slice(0, 40));
+  }
 } finally {
   // Guarantee cleanup even if an assert/read throws — otherwise a failed probe
   // leaves the whole clone subtree (potentially GB) on disk.

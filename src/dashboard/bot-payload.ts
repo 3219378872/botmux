@@ -133,6 +133,10 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
       ? j.sandboxMode
       : (j?.sandbox === 'scratch' ? 'scratch' : j?.sandbox === true || j?.sandbox === 'oncall' ? 'oncall' : 'off'),
     scratchStorage: j?.scratchStorage === 'disk' || j?.scratchStorage === 'tmpfs' ? j.scratchStorage : null,
+    // tmpfs-vs-disk selection exists only on Linux (full-root overlay). On
+    // macOS scratch is always APFS clonefile COW (disk-backed, swap-backed);
+    // the UI hides the storage segmented control there.
+    scratchStorageSelectable: process.platform === 'linux',
     scratchTmpfsSizeMb: typeof j?.scratchTmpfsSizeMb === 'number' ? j.scratchTmpfsSizeMb : null,
     scratchDenyPaths: Array.isArray(j?.scratchDenyPaths) ? j.scratchDenyPaths.filter((x: unknown) => typeof x === 'string') : null,
     scratchSupported: j?.scratchSupported === true,

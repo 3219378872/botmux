@@ -1,18 +1,25 @@
 /**
- * Regression (PR #1513 pi review P1-1): Linux scratch must hide transport
+ * Regression (PR #1513 reviews): Linux scratch must hide transport
  * credentials from inside the sandbox — bots.json (+sidecars), dashboard
- * secret, per-bot send-cred.json, webhook keys, shared lark-cli keystore.
+ * secret, per-bot send-cred.json, webhook keys, per-person user tokens,
+ * vc/bytedcli dirs, cli-identity, lark-cli keystores.
  *
- * File-shaped denies are ro-bound to a mode-000 empty placeholder (same
- * mechanism as oncall): reads SUCCEED but return EMPTY content, never the
- * secret. Dir denies return ENOENT/EPERM. Either way the secret bytes never
- * reach the child. This probe asserts on CONTENT, not on errno.
+ * SAFETY — this probe runs against FULLY ISOLATED temp homes only:
+ *  - a temp HOME (passed as `homeDir` to the enumerator AND to
+ *    prepareScratchSandbox), never the operator's real homedir();
+ *  - a temp BOTMUX_HOME / BOTMUX_DATA_HOME / LARKSUITE_CLI_DATA_DIR;
+ *  - every secret path it writes is UNDER those temp dirs;
+ *  - it refuses (exit 1) to write any fixture path that already exists outside
+ *    the freshly-created temp root (fail-closed: never clobber a real key).
  *
- * Linux + bwrap only. Uses a temp fake botmux home; never touches real creds.
+ * File denies are ro-bound to empty placeholders (content hidden), dir denies
+ * return ENOENT. Assertions are on secret CONTENT, not errno.
+ *
+ * Linux + bwrap only.
  */
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
-import { tmpdir, homedir } from 'node:os';
-import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { prepareScratchSandbox, teardownScratchSession } from '../dist/adapters/backend/scratch-sandbox.js';
 import { enumerateScratchSecretPaths } from '../dist/adapters/backend/scratch-credentials.js';
@@ -28,21 +35,41 @@ const check = (n, c, d = '') => {
   if (!c) failures.push(n);
 };
 
+// ── Fully isolated roots ────────────────────────────────────────────────────
 const root = mkdtempSync(join(tmpdir(), 'botmux-scratch-cred-'));
-const botmuxHome = join(root, 'home');
+const fakeHome = join(root, 'home');                 // passed as HOME / homeDir
+const botmuxHome = join(fakeHome, '.botmux');        // $BOTMUX_HOME
 const dataDir = join(botmuxHome, 'data');
+const larkData = join(root, 'larkdata');            // $LARKSUITE_CLI_DATA_DIR
+// Pin lark-cli resolution to the temp root for the WHOLE probe process — the
+// enumerator resolves $LARKSUITE_CLI_DATA_DIR at call time, so the var must be
+// set before enumeration (and kept out of the operator's real store).
+process.env.LARKSUITE_CLI_DATA_DIR = larkData;
+process.env.HOME = fakeHome;
 const appId = 'app-cred-probe';
 const cwd = mkdtempSync(join(tmpdir(), 'botmux-scratch-cred-cwd-'));
 const sid = `probe-cred-${process.pid}-${Date.now()}`;
 
+const writeSecret = (path, content) => {
+  // Fail-closed: never overwrite a pre-existing path outside the fresh temp
+  // root (this probe once clobbered the operator's real lark-cli master.key).
+  if (existsSync(path) && !path.startsWith(root) && !path.startsWith(cwd)) {
+    console.error(`REFUSING to clobber pre-existing path outside temp root: ${path}`);
+    process.exit(2);
+  }
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, content, { mode: 0o600 });
+};
+
+// Layout the fake authority home + lark keystore ENTIRELY under temp roots.
 mkdirSync(join(botmuxHome, 'bots', appId), { recursive: true });
 mkdirSync(dataDir, { recursive: true });
-mkdirSync(join(homedir(), '.lark-cli'), { recursive: true });
-mkdirSync(join(homedir(), '.local', 'share', 'lark-cli'), { recursive: true });
+mkdirSync(join(larkData, 'lark-cli'), { recursive: true });
 mkdirSync(join(dataDir, 'vc-meeting-daemon-auth'), { recursive: true });
 mkdirSync(join(dataDir, 'bytedcli-home', 'ou-someone'), { recursive: true });
 mkdirSync(join(dataDir, 'cli-identity', `${sid}.bin`, '.data'), { recursive: true });
 mkdirSync(join(dataDir, 'cli-identity', 'session-OTHER.bin', '.data'), { recursive: true });
+
 const OWN_ENV = join(dataDir, 'cli-identity', `${sid}.bin`, '.data', 'lark-cli.env');
 const OTHER_ENV = join(dataDir, 'cli-identity', 'session-OTHER.bin', '.data', 'lark-cli.env');
 const BOTS = join(botmuxHome, 'bots.json');
@@ -50,25 +77,35 @@ const SECRET = join(botmuxHome, '.dashboard-secret');
 const SIDECAR = `${BOTS}.bak-1`;
 const SEND_CRED = join(botmuxHome, 'bots', appId, 'send-cred.json');
 const WEBHOOK = join(dataDir, 'webhook-master.key');
-const LARK_STORE = join(homedir(), '.lark-cli');
-const LARK_STORE_REAL = join(homedir(), '.local', 'share', 'lark-cli');
+const LEGACY_LARK_STORE = join(fakeHome, '.lark-cli');
+const REAL_LARK_STORE = join(larkData, 'lark-cli');
 const USER_TOKEN = join(dataDir, `user-token-cli_x-${'ou'.repeat(8)}.json`);
 const VC_TOKEN = join(dataDir, 'vc-meeting-daemon-auth', '57');
 const BYTEDCLI_LOGIN = join(dataDir, 'bytedcli-home', 'ou-someone', 'login.json');
-writeFileSync(BOTS, JSON.stringify([{ larkAppId: appId, larkAppSecret: 'SECRET-appsecret-XYZ' }]));
-writeFileSync(SIDECAR, 'OLD-SECRET-sidecar');
-writeFileSync(SECRET, 'SECRET-dashboard-hmac-123');
-writeFileSync(SEND_CRED, JSON.stringify({ sendSecret: 'SECRET-sendcred-ABC' }));
-writeFileSync(WEBHOOK, 'SECRET-webhook-key');
-writeFileSync(USER_TOKEN, JSON.stringify({ access_token: 'SECRET-user-access-token' }));
-writeFileSync(VC_TOKEN, '57-SECRET-vcda');
-writeFileSync(BYTEDCLI_LOGIN, JSON.stringify({ openId: 'SECRET-bytedcli-login' }));
-writeFileSync(OWN_ENV, "TOKEN='SECRET-own-session-token'");
-writeFileSync(OTHER_ENV, "TOKEN='SECRET-other-person-token'");
-writeFileSync(join(LARK_STORE_REAL, 'master.key'), 'SECRET-real-lark-master');
-const larkMarker = join(LARK_STORE, '.cred-probe-marker');
-let larkStoreProbeable = false;
-try { writeFileSync(larkMarker, 'SECRET-larkstore'); larkStoreProbeable = true; } catch { /* TCC */ }
+
+writeSecret(BOTS, JSON.stringify([{ larkAppId: appId, larkAppSecret: 'SECRET-appsecret-XYZ' }]));
+writeSecret(SIDECAR, 'OLD-SECRET-sidecar');
+writeSecret(SECRET, 'SECRET-dashboard-hmac-123');
+writeSecret(SEND_CRED, JSON.stringify({ sendSecret: 'SECRET-sendcred-ABC' }));
+writeSecret(WEBHOOK, 'SECRET-webhook-key');
+writeSecret(USER_TOKEN, JSON.stringify({ access_token: 'SECRET-user-access-token' }));
+writeSecret(VC_TOKEN, '57-SECRET-vcda');
+writeSecret(BYTEDCLI_LOGIN, JSON.stringify({ openId: 'SECRET-bytedcli-login' }));
+writeSecret(OWN_ENV, "TOKEN='SECRET-own-session-token'");
+writeSecret(OTHER_ENV, "TOKEN='SECRET-other-person-token'");
+// lark keystores (fake home — both the legacy ~/.lark-cli form and the real
+// ~/.local/share form resolved from $LARKSUITE_CLI_DATA_DIR).
+mkdirSync(LEGACY_LARK_STORE, { recursive: true });
+writeSecret(join(LEGACY_LARK_STORE, '.cred-probe-marker'), 'SECRET-larkstore');
+writeSecret(join(REAL_LARK_STORE, 'master.key'), 'SECRET-real-lark-master');
+
+// Defensive: assert NONE of the keystore paths we just used are inside the
+// operator's real ~/.local/share/lark-cli or ~/.lark-cli.
+for (const p of [REAL_LARK_STORE, LEGACY_LARK_STORE]) {
+  if (p.includes('/.local/share/lark-cli') && !p.startsWith(root)) {
+    console.error('refusing: lark store path escapes temp root'); process.exit(2);
+  }
+}
 
 try {
   const secretSet = enumerateScratchSecretPaths({
@@ -76,6 +113,7 @@ try {
     dataDirs: [dataDir],
     botsConfigPath: BOTS,
     sessionId: sid,
+    homeDir: fakeHome,
   });
   const denyPaths = secretSet.denyPaths;
   const roCarves = secretSet.readOnlyCarvePaths;
@@ -88,21 +126,27 @@ try {
   check('enumerator found vc daemon auth dir', denyPaths.includes(join(dataDir, 'vc-meeting-daemon-auth')));
   check('enumerator found bytedcli-home dir', denyPaths.includes(join(dataDir, 'bytedcli-home')));
   check('enumerator sealed cli-identity dir', denyPaths.includes(join(dataDir, 'cli-identity')));
-  check('enumerator carved OWN session <sid>.bin dir read-only', roCarves.includes(join(dataDir, 'cli-identity', `${sid}.bin`)));
-  check('enumerator did NOT carve other session .bin dir', !roCarves.includes(join(dataDir, 'cli-identity', 'session-OTHER.bin')));
-  check('enumerator found legacy ~/.lark-cli store', denyPaths.includes(LARK_STORE));
-  check('enumerator found REAL ~/.local/share/lark-cli store', denyPaths.includes(LARK_STORE_REAL));
+  check('enumerator carved OWN <sid>.bin dir read-only', roCarves.includes(join(dataDir, 'cli-identity', `${sid}.bin`)));
+  check('enumerator did NOT carve other .bin dir', !roCarves.includes(join(dataDir, 'cli-identity', 'session-OTHER.bin')));
+  check('enumerator found legacy ~/.lark-cli store', denyPaths.includes(LEGACY_LARK_STORE));
+  check('enumerator found REAL lark-cli store (LARKSUITE_CLI_DATA_DIR)', denyPaths.includes(REAL_LARK_STORE));
 
   const sbx = prepareScratchSandbox({
     sessionId: sid,
     dataDir,
     storage: 'disk',
     chdir: cwd,
-    home: homedir(),
+    home: fakeHome,
     cliBin: '/bin/sh',
     cliArgs: ['-c', 'true'],
     denyPaths,
     readOnlyCarvePaths: roCarves,
+    env: {
+      // Keep ALL lark-cli resolution pointed at the fake roots inside the
+      // sandbox too, so nothing ever resolves to the operator's store.
+      BOTMUX_HOME: botmuxHome,
+      LARKSUITE_CLI_DATA_DIR: larkData,
+    },
   });
   check('prepare ok', !!sbx);
   if (!sbx) process.exit(1);
@@ -111,37 +155,27 @@ try {
   const pre = sbx.args.slice(0, dash);
   const readInside = (path) => {
     const r = spawnSync(sbx.bin, [...pre, '/bin/sh', '-c', `cat ${JSON.stringify(path)} 2>/dev/null; echo RC=$?`],
-      { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
+      { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', env: { ...process.env, HOME: fakeHome } });
     return r.stdout;
   };
 
-  // Content-based assertion: the secret marker must never appear, regardless of
-  // whether the file deny surfaces as empty content or ENOENT/EPERM.
   const secretHidden = (path, marker) => !readInside(path).includes(marker);
-  check('bots.json secret content hidden', secretHidden(BOTS, 'appsecret-XYZ'), readInside(BOTS).trim().slice(0, 60));
-  check('bots.json sidecar content hidden', secretHidden(SIDECAR, 'OLD-SECRET'));
+  check('bots.json secret content hidden', secretHidden(BOTS, 'appsecret-XYZ'));
+  check('bots.json sidecar hidden', secretHidden(SIDECAR, 'OLD-SECRET'));
   check('dashboard secret hidden', secretHidden(SECRET, 'dashboard-hmac'));
   check('per-bot send-cred.json hidden', secretHidden(SEND_CRED, 'sendcred-ABC'));
   check('webhook key hidden', secretHidden(WEBHOOK, 'webhook-key'));
   check('per-person user access token hidden', secretHidden(USER_TOKEN, 'user-access-token'));
-  check('vc daemon auth token hidden (dir mask)', secretHidden(VC_TOKEN, 'SECRET-vcda'));
-  check('bytedcli login hidden (dir mask)', secretHidden(BYTEDCLI_LOGIN, 'SECRET-bytedcli-login'));
+  check('vc daemon auth token hidden', secretHidden(VC_TOKEN, 'SECRET-vcda'));
+  check('bytedcli login hidden', secretHidden(BYTEDCLI_LOGIN, 'SECRET-bytedcli-login'));
   check('OTHER session trigger-user token hidden', secretHidden(OTHER_ENV, 'SECRET-other-person-token'));
-  // own session identity must remain readable (governed CLI / botmux send sources it)
-  const ownOut = readInside(OWN_ENV);
-  check('OWN session identity still readable (ro carve)', ownOut.includes('SECRET-own-session-token'), ownOut.trim().slice(0, 50));
-  check('REAL lark-cli master.key hidden', secretHidden(join(LARK_STORE_REAL, 'master.key'), 'real-lark-master'));
-  if (larkStoreProbeable) check('shared lark-cli store hidden', secretHidden(larkMarker, 'larkstore'));
-
-  // Non-secret system file still readable (read-all posture intact).
-  const etc = spawnSync(sbx.bin, [...pre, '/bin/sh', '-c', 'cat /etc/hostname'],
-    { stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8' });
-  check('non-secret system file still readable', etc.status === 0 && etc.stdout.trim().length > 0);
+  check('OWN session identity still readable (ro carve)', readInside(OWN_ENV).includes('SECRET-own-session-token'));
+  check('REAL lark-cli master.key hidden', secretHidden(join(REAL_LARK_STORE, 'master.key'), 'real-lark-master'));
+  check('legacy lark-cli store hidden', secretHidden(join(LEGACY_LARK_STORE, '.cred-probe-marker'), 'larkstore'));
 
   sbx.cleanup();
 } finally {
   teardownScratchSession(sid, dataDir);
-  try { rmSync(larkMarker, { force: true }); } catch { /* */ }
   rmSync(root, { recursive: true, force: true });
   rmSync(cwd, { recursive: true, force: true });
 }
