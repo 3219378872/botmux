@@ -7041,6 +7041,11 @@ function codexBridgeStartTimer(): void {
             } else {
               codexBridgeAttach(path, antigravityLateAttachMode(path));
             }
+          } else if (path === codexBridgeRolloutPath && codexBridgePendingSessionId) {
+            // The pending conversation turned out to be the one already bound
+            // (id reported before its file existed). Clear the pending marker
+            // so subsequent ticks don't re-resolve it every second.
+            codexBridgePendingSessionId = undefined;
           }
         }
         codexBridgeIngest();
@@ -7750,7 +7755,10 @@ function codexBridgeNotifyCliSessionId(cliSessionId: string): void {
     // also how `/new` surfaces the freshly-minted conversation in the same
     // process), so this is both the first-attach and the rotation path.
     const agyPath = resolveFileBridgePath('antigravity', { sessionId: cliSessionId });
-    if (agyPath === codexBridgeRolloutPath) return;
+    if (agyPath === codexBridgeRolloutPath) {
+      codexBridgePendingSessionId = undefined;
+      return;
+    }
     if (agyPath) {
       if (codexBridgeRolloutPath) {
         // Conversation rotated (/new): drain the retired transcript so a
