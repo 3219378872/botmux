@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   closeSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   openSync,
@@ -539,6 +540,63 @@ describe('recovering a session store poisoned by a crashed SQLite import', () =>
       expect(after.ids).toEqual([]);
       // ...and the poison signal is cleared, so this does not re-recover forever.
       expect(readdirSync(join(dataDir, 'session-stores', 'appA')).filter(n => n.includes('.tmp'))).toEqual([]);
+    });
+  });
+
+  it('accepts a readable flat legacy snapshot that holds zero rows for this bot (narrowed rescue)', () => {
+    withDirs((dataDir, home) => {
+      // A-8 keeps a NARROWED one-shot rescue from the shared flat sessions.json
+      // when this bot has no own sessions-appA.json (the <=1.12.x straight-upgrade
+      // group). Poison recovery must treat that legacy file the same way as the
+      // per-bot snapshot: it was READ, so even when every row belongs to a
+      // DIFFERENT app and it filters to zero rows here, it positively ATTESTS
+      // this bot held nothing — `source: 'legacy'` must count, not just
+      // 'per-bot'. Simplifying `frozenAttests` to per-bot-only would strand this
+      // narrow group's poisoned store unavailable forever (fail-closed, manual
+      // rescue), so this is the guard for that branch.
+      const report = poison(dataDir, home, { rows: 0 });
+      expect(report.rowCount).toBe(0);
+      expect(existsSync(join(dataDir, 'sessions-appA.json'))).toBe(false);
+      writeFileSync(join(dataDir, 'sessions.json'), JSON.stringify({
+        OTHERBOT: {
+          sessionId: 'OTHERBOT', larkAppId: 'appZ', chatId: 'oc_other', rootMessageId: 'om_other',
+          title: 'someone else', status: 'active', createdAt: '2026-01-01T00:00:00.000Z', scope: 'topic',
+        },
+      }));
+
+      const after = load(dataDir, home);
+      expect(after.strict).toBe(0);
+      expect(after.ids).toEqual([]);
+      // The poison signal is cleared, so this does not re-recover forever.
+      expect(readdirSync(join(dataDir, 'session-stores', 'appA')).filter(n => n.includes('.tmp'))).toEqual([]);
+    });
+  });
+
+  it('rescues this bot’s rows from the flat legacy snapshot without leaking another bot’s (narrowed rescue)', () => {
+    withDirs((dataDir, home) => {
+      // Poisoned-recovery side of the A-8 narrowed rescue: with the orphan
+      // damaged so only a snapshot can authorise the merge, and NO own
+      // sessions-appA.json present, recovery must read the shared flat
+      // sessions.json and merge ONLY rows whose larkAppId is this bot. A
+      // sibling bot's row can never leak into this store. (The first-start
+      // import side is covered in session-store-sqlite.test.ts.)
+      poison(dataDir, home);
+      truncateSync(join(dataDir, 'session-stores', 'appA', 'sessions.db.tmp-wal'), 20_000);
+      expect(existsSync(join(dataDir, 'sessions-appA.json'))).toBe(false);
+      const legacy: Record<string, unknown> = {};
+      for (const [id, row] of Object.entries(frozenJsonRows())) {
+        legacy[id] = { ...(row as Record<string, unknown>), larkAppId: 'appA' };
+      }
+      legacy.OTHERBOT = {
+        sessionId: 'OTHERBOT', larkAppId: 'appZ', chatId: 'oc_other', rootMessageId: 'om_other',
+        title: 'someone else', status: 'active', createdAt: '2026-01-01T00:00:00.000Z', scope: 'topic',
+      };
+      writeFileSync(join(dataDir, 'sessions.json'), JSON.stringify(legacy));
+
+      const after = load(dataDir, home);
+      expect(after.visible).toBe(SESSION_ROWS);
+      expect(after.strict).toBe(SESSION_ROWS);
+      expect(after.ids).not.toContain('OTHERBOT');
     });
   });
 
