@@ -12524,6 +12524,7 @@ async function cmdReport(rest: string[]): Promise<void> {
     : undefined;
   const s = await requireSessionById(sid);
   if (!s.larkAppId) { console.error(`session ${sid} 缺少 larkAppId`); process.exit(1); }
+  const sessions = loadSessions();
 
   const { readPeerCrossRef } = await import('./services/peer-cross-ref-store.js');
   let recipientResolution: ReturnType<typeof resolveReportRecipientForSession>;
