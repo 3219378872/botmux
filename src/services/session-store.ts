@@ -1172,34 +1172,75 @@ function parseSessionsProjectionStrict(raw: string, fp: string): Record<string, 
 }
 
 /** Which snapshot file a recovery/import read actually resolved. `none` means no
- *  readable snapshot existed at all — distinct from "a readable snapshot that
+ *  readable snapshot for THIS bot — distinct from "a readable snapshot that
  *  legitimately holds zero rows for this bot", which IS evidence. */
-type FrozenSnapshotSource = 'per-bot' | 'none';
+type FrozenSnapshotSource = 'per-bot' | 'legacy' | 'none';
 
-/** The JSON rows today's load()/migration would have produced for this store,
- *  plus WHICH file they came from. The source matters to recovery: a per-bot
- *  `sessions-<appId>.json` that parses (even to zero rows) attests the store;
- *  a missing file proves nothing. */
-function readFrozenSnapshotForImport(jsonFp: string): {
-  entries: [string, Session][];
-  source: FrozenSnapshotSource;
-} {
-  if (!existsSync(jsonFp)) return { entries: [], source: 'none' };
-  const data = parseSessionsProjectionStrict(readFileSync(jsonFp, 'utf-8'), jsonFp);
-  const entries = Object.entries(data);
+function repairImportedRows(entries: [string, Session][]): void {
   for (const [, value] of entries) {
     if (value && typeof value === 'object') {
       repairMissingChatScope(value);
       stripLegacyPendingCardFields(value as unknown as Record<string, unknown>);
     }
   }
-  return { entries, source: 'per-bot' };
+}
+
+/** The JSON rows today's load()/migration would have produced for this store,
+ *  plus WHICH file they came from. The source matters to recovery: a snapshot
+ *  that was actually READ (per-bot, or a legacy file filtering to zero rows
+ *  for this bot) attests the store; a missing/unreadable file proves nothing. */
+function readFrozenSnapshotForImport(jsonFp: string): {
+  entries: [string, Session][];
+  source: FrozenSnapshotSource;
+} {
+  // The bot's OWN per-bot frozen JSON is the normal one-shot import source. It
+  // parses STRICT: a malformed own source must fail closed, never build an
+  // empty store that would silently swallow every pre-SQLite row.
+  if (existsSync(jsonFp)) {
+    const data = parseSessionsProjectionStrict(readFileSync(jsonFp, 'utf-8'), jsonFp);
+    const entries = Object.entries(data);
+    repairImportedRows(entries);
+    return { entries, source: 'per-bot' };
+  }
+
+  const appId = currentAppId;
+  if (!appId) return { entries: [], source: 'none' };
+
+  // Narrowed legacy rescue (A-8): the flat `sessions.json` written by builds
+  // 1.8.0–1.12.x (2026-03-13…20, before the per-bot split landed in 1.13.0)
+  // carried `larkAppId` on every row. A deployment that ran ONLY those builds
+  // and jumps straight to a SQLite release still gets its rows imported once;
+  // rows without `larkAppId` (the pre-release first 11 days) are abandoned.
+  //
+  // This file is a SHARED, foreign artifact — not this bot's own import source
+  // — so it must never hold this bot's first start hostage. A malformed or
+  // non-object legacy file degrades to "no attested rows" instead of throwing:
+  // the empty store builds and the file is left untouched. The own-file branch
+  // above stays strict.
+  const legacyFp = join(config.session.dataDir, 'sessions.json');
+  if (!existsSync(legacyFp)) return { entries: [], source: 'none' };
+  let legacy: Record<string, Session>;
+  try {
+    legacy = parseSessionsProjectionStrict(readFileSync(legacyFp, 'utf-8'), legacyFp);
+  } catch (err) {
+    logger.warn(
+      `Ignoring unreadable legacy ${legacyFp} for ${appId} first import: `
+      + `${err instanceof Error ? err.message : String(err)}`,
+    );
+    return { entries: [], source: 'none' };
+  }
+  // Parsed (even when it filters down to zero rows for this bot) = the file WAS
+  // read, which attests what this store held; that is `legacy`, not `none`.
+  const entries = Object.entries(legacy).filter(([, value]) => value?.larkAppId === appId);
+  repairImportedRows(entries);
+  return { entries, source: 'legacy' };
 }
 
 /** The JSON rows today's load()/migration would have produced for this store
- *  from `sessions-<appId>.json`; scope repair applied, legacy card fields
- *  stripped, closed rows included. Parse failures degrade to an empty store —
- *  exactly like the previous loader. */
+ *  from `sessions-<appId>.json` (or the narrowed legacy rescue); scope repair
+ *  applied, legacy card fields stripped, closed rows included. Parse failures
+ *  of the OWN file throw (load() fails closed); an unreadable shared legacy
+ *  file degrades to no rows. */
 function readJsonEntriesForImport(jsonFp: string): [string, Session][] {
   return readFrozenSnapshotForImport(jsonFp).entries;
 }

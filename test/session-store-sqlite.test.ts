@@ -122,6 +122,53 @@ describe('first-start JSON import', () => {
     expect(readFileSync(jsonFp, 'utf-8')).toBe(jsonBefore);
   });
 
+  it('rescues only this bot’s larkAppId-tagged rows from the shared flat sessions.json', () => {
+    // Builds 1.8.0–1.12.x (2026-03-13…20, before the 1.13.0 per-bot split)
+    // wrote every row into the flat `sessions.json` WITH a larkAppId. A
+    // deployment that jumps straight from one of those builds to a SQLite
+    // release still gets its own rows imported once; sibling bots' rows and
+    // untagged rows are abandoned.
+    const legacyFp = seedJson('sessions.json', {
+      a1: row('a1', { larkAppId: 'appA' }),
+      a2: row('a2', { larkAppId: 'appA' }),
+      otherBot: row('otherBot', { larkAppId: 'appZ' }),
+      untagged: row('untagged'),
+    });
+    const legacyBefore = readFileSync(legacyFp, 'utf-8');
+    expect(existsSync(join(tempDir, 'sessions-appA.json'))).toBe(false);
+
+    init('appA');
+
+    const ids = listSessions().map(s => s.sessionId).sort();
+    expect(ids).toEqual(['a1', 'a2']);
+    expect(getSession('otherBot')).toBeUndefined();
+    expect(getSession('untagged')).toBeUndefined();
+    // The per-bot store was built from the rescued rows.
+    expect(existsSync(join(tempDir, 'session-stores', 'appA', 'sessions.db'))).toBe(true);
+    expect(Object.keys(readPersistedSessionRows(tempDir, 'appA')).sort()).toEqual(['a1', 'a2']);
+    // The shared legacy file is never rewritten/deleted — it stays frozen.
+    expect(readFileSync(legacyFp, 'utf-8')).toBe(legacyBefore);
+  });
+
+  it('does not let an unrelated malformed flat sessions.json block this bot first start', () => {
+    // The flat file is a SHARED foreign artifact: when this bot has no own
+    // per-bot JSON, a corrupt legacy file must degrade to "no rescued rows",
+    // never fail the whole first import (master threw here and built no .db,
+    // letting one bot’s broken flat file take every bot’s first start hostage).
+    const legacyFp = join(tempDir, 'sessions.json');
+    mkdirSync(tempDir, { recursive: true });
+    writeFileSync(legacyFp, '{broken-legacy');
+
+    init('appA');
+    // Own first start still succeeds and builds an empty, writable store.
+    expect(() => listSessionsStrict()).not.toThrow();
+    const created = createSession('oc_fresh', 'om_fresh', 'Fresh');
+    expect(created.status).toBe('active');
+    expect(existsSync(join(tempDir, 'session-stores', 'appA', 'sessions.db'))).toBe(true);
+    // The corrupt foreign file is left exactly as found.
+    expect(readFileSync(legacyFp, 'utf-8')).toBe('{broken-legacy');
+  });
+
   it('is idempotent: a restart with the frozen JSON still present must not re-import', () => {
     const jsonFp = seedJson('sessions-appA.json', { s1: row('s1') });
     init('appA');
