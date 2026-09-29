@@ -154,7 +154,10 @@ describe('CLI persisted backend targets', () => {
       ...first, sessionId: 'abcdef12-5555-6666-7777-888888888888', rootMessageId: 'om_other', title: 'namespace-b',
       persistentBackendTarget: { backendType: 'zmx', sessionName, socketDir: '/tmp/list-zmx-b' },
     };
-    seedPersistedSessionRows(fixture.dataDir, undefined, { [first.sessionId]: first, [second.sessionId]: second });
+    seedPersistedSessionRows(fixture.dataDir, 'cli-target', {
+      [first.sessionId]: { ...first, larkAppId: 'cli-target' },
+      [second.sessionId]: { ...second, larkAppId: 'cli-target' },
+    });
     const fakeZmx = join(fixture.binDir, 'zmx');
     writeFileSync(fakeZmx, `#!/usr/bin/env node
 const { appendFileSync } = require('node:fs');

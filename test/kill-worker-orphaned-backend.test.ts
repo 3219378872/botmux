@@ -171,7 +171,7 @@ describe('killStalePids — ZMX CLI-change cleanup', () => {
       expect(zmxKill).toHaveBeenCalledWith(EXPECTED_NAME, orphan.sessionId, undefined,
         expect.objectContaining({ ZMX_DIR: '/tmp/orphan-zmx' }));
     } finally {
-      sessionStore.init();
+      sessionStore.init('zmx-directory-cleanup-test');
       config.daemon.backendType = previousBackendType;
       if (previousDataDirEnv === undefined) delete process.env.SESSION_DATA_DIR;
       else process.env.SESSION_DATA_DIR = previousDataDirEnv;

@@ -1108,7 +1108,7 @@ describe('principal lane durable store', () => {
       workspaceGroupId: legacy.workspaceGroupId,
       displayTarget: legacy.displayTarget,
     };
-    init();
+    init(appId);
     const code = `
       import { init, ensurePrincipalWorkspaceMembershipV2 } from './src/services/session-store.js';
       init(${JSON.stringify(appId)});
@@ -1652,7 +1652,7 @@ describe('principal lane durable store', () => {
       now: '2026-09-19T08:01:00.000Z',
     });
     if (created.status !== 'ready') throw new Error('expected materialized lane');
-    init();
+    init(appId);
     const dbPath = join(tempDir, 'session-stores', appId, 'sessions.db');
     const old = new DatabaseSync(dbPath);
     try {
@@ -2357,7 +2357,7 @@ describe('principal lane durable store', () => {
       now,
     });
     // Release this process's connection before the two independent creators race.
-    init();
+    init(appId);
     const code = `
       import { init, ensureShadowPrincipalLane } from './src/services/session-store.js';
       init(${JSON.stringify(appId)});
@@ -2413,7 +2413,7 @@ describe('principal lane durable store', () => {
       now,
     });
     const materialization = worktreeMaterialization({ sourceSessionId: source.sessionId });
-    init();
+    init(appId);
     const code = `
       import { init, ensureShadowPrincipalLane } from './src/services/session-store.js';
       init(${JSON.stringify(appId)});
@@ -2995,9 +2995,9 @@ describe('createSessionWithOwnedMutation()', () => {
 describe('init()', () => {
   it('migrates legacy stores by creating principal-lane sidecars without rewriting session rows', () => {
     const legacy = createSession('chat-legacy', 'root-legacy', 'legacy');
-    const before = JSON.stringify(readPersistedRows(tempDir)[legacy.sessionId]);
+    const before = JSON.stringify(readPersistedRows(tempDir, 'test-app')[legacy.sessionId]);
 
-    const db = new DatabaseSync(join(tempDir, 'sessions.db'));
+    const db = new DatabaseSync(join(tempDir, 'session-stores', 'test-app', 'sessions.db'));
     try {
       const tables = new Set((db.prepare(
         "SELECT name FROM sqlite_master WHERE type = 'table'",
@@ -3019,7 +3019,7 @@ describe('init()', () => {
       db.close();
     }
 
-    expect(JSON.stringify(readPersistedRows(tempDir)[legacy.sessionId])).toBe(before);
+    expect(JSON.stringify(readPersistedRows(tempDir, 'test-app')[legacy.sessionId])).toBe(before);
     expect(getOwnedSession(legacy.sessionId)?.principalLane).toBeUndefined();
     expect(getOwnedSession(legacy.sessionId)?.principalLaneSource).toBeUndefined();
   });
@@ -3398,7 +3398,7 @@ describe('closeSession()', () => {
     updateSession(session);
 
     closeSession(session.sessionId);
-    init();
+    init('test-app');
 
     expect(getSession(session.sessionId)?.status).toBe('closed');
     expect(getSession(session.sessionId)?.crossPrincipalInterruptions).toBeUndefined();
@@ -3871,13 +3871,13 @@ describe('reactivateClosedSession()', () => {
         messages: [{ turnId: 'om_legacy', text: 'legacy input', userPrompt: 'legacy input', createdAt: legacy.createdAt }],
       }];
       updateSession(legacy);
-      init();
+      init('test-app');
 
       const result = reactivateClosedSession(session.sessionId);
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.session.crossPrincipalInterruptions).toBeUndefined();
 
-      init();
+      init('test-app');
       const reloaded = getSession(session.sessionId)!;
       expect(reloaded.status).toBe('active');
       expect(reloaded.crossPrincipalInterruptions).toBeUndefined();

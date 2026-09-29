@@ -647,7 +647,7 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
       status: 'active',
     };
     sessionStore.updateSession(s);
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
 
@@ -688,7 +688,7 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
       status: 'active',
     };
     sessionStore.updateSession(s);
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
     vi.mocked(setActiveSessionSafe).mockImplementationOnce(async (sessions, key, ds) => {
@@ -739,7 +739,7 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
       status: 'active',
     };
     sessionStore.updateSession(s);
-    sessionStore.init();
+    sessionStore.init('app_test');
     const map = new Map<string, DaemonSession>();
     wp.registry = map;
 
