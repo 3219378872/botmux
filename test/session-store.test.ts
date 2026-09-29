@@ -119,7 +119,6 @@ import {
 } from '../src/services/session-store.js';
 import { settlePrincipalLaneOutboundProvenance } from '../src/core/principal-lane-outbound-provenance.js';
 import { seedPersistedSessionRows, readPersistedSessionRows, sessionStorePath } from './helpers/session-store-disk.js';
-import { withFileLockSync } from '../src/utils/file-lock.js';
 import { spawnSyncTsEvalWithRepoImports, spawnTsEvalWithRepoImports } from './helpers/ts-runner.js';
 import {
   clearCodexInstanceBots,
@@ -178,7 +177,6 @@ function readPersistedRows(dir: string, appId: string): Record<string, any> {
 beforeEach(() => {
   tempDir = makeTempDir();
   testWorktreeDirs = new Set();
-  fsControl.failSessionWrite = false;
   fsControl.failReaddir = false;
   costCalculatorMock.getSessionTokenUsage.mockReset();
   costCalculatorMock.getSessionTokenUsage.mockReturnValue(null);
