@@ -1685,6 +1685,12 @@ export const messages: Record<string, string> = {
 
   // Worker-side submit / notify messages
   'worker.codex_composer_conflict': '已 adopt 的 Codex 终端输入框里已有未提交的本地草稿。botmux 保留了草稿，没有把这条飞书消息拼到后面。请先提交或清空本地草稿，再重发飞书消息。',
+  'worker.codex_statusline_updated': 'BotMux 已在 {path} 中补齐状态栏会话 ID，保留了原有显示项目；原文件备份为同路径加 .botmux-statusline.bak（原文件不存在时不生成备份）。后续启动并使用这份配置的 Codex 会读取新设置。当前已运行的终端可能尚未生效：请在原 Terminal 的 /statusline 中启用 thread-id（旧名 session-id），移到最前并保存；确保完整 ID 可见、输入框为空后再从飞书发送消息。无需新建会话，BotMux 不会自动重启 Codex。',
+  'worker.codex_statusline_configured': '{path} 中已配置状态栏会话 ID，但 BotMux 尚未从当前终端读到完整 ID。请在原 Terminal 的 /statusline 中启用 thread-id（旧名 session-id），移到最前并保存，必要时加宽窗口；确保完整 ID 可见、输入框为空后再从飞书发送消息。后续启动并使用这份配置的 Codex 会读取该设置，无需新建会话。',
+  'worker.codex_statusline_failed': 'BotMux 无法自动修改 Codex 状态栏配置（{path}），未覆盖原配置。请检查文件权限、配置格式或正在进行的配置编辑；也可以直接在原 Terminal 的 /statusline 中启用 thread-id（旧名 session-id），移到最前并保存。确保完整 ID 可见、输入框为空后再从飞书发送消息，无需新建会话。',
+  'worker.codex_statusline_unknown_path': '无法确认原 Codex 进程的配置目录',
+  'worker.codex_terminal_message_not_written': '当前会话 ID 尚未确认，这条消息尚未写入 Codex。',
+  'worker.codex_terminal_identity_unavailable': 'BotMux 未能从原 Codex 终端确认当前会话，尚未写入这条消息。请在原 Terminal 的 /statusline 中启用 thread-id（旧名 session-id），将其移到最前并确保完整显示；处理草稿或弹窗、等待加载结束且输入框为空后再重发。无需另开会话。',
   'worker.transcriptLabel': '会话存储',
   'worker.submit_impossible': '⚠️ 刚才那条消息没有安全写入 {cliName}。\n原因：{reason}\n请处理上述原因并确认终端状态后再试。\n开头：{preview}',
   'worker.activation_submit_unconfirmed': '⚠️ 首条消息的提交尚未确认\n阶段：输入提交\n错误码：submit_unconfirmed\nBotMux 尚未在{transcriptLabel}确认 {cliName} 收到首条消息；它可能仍在执行或已经执行。后续消息会等待这条确认。\n请打开 Web 终端核对原输入与执行状态；若原输入仍未提交，请在终端完成提交。BotMux 会继续观察原提交回执，确认到达后自动释放队列。\n此时在飞书重发只会继续排队。若终端无法恢复，请关闭该会话后重新开始。\n原消息：{preview}',

@@ -72,6 +72,7 @@ import { larkTransportEnabled as sessionLarkTransportEnabled } from './core/type
 import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, stringifyUserContent, extractTurnStartText, splitTranscriptEventsByCutoff, isTranscriptRateLimitEvent, apiErrorMessageText, extractCotEntries, ClaudeModelFallbackTracker, BackgroundTaskTracker, type ModelFallbackObservation, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint, type BridgePendingTurn } from './services/bridge-turn-queue.js';
 import { bridgePostText, composeFailedBridgeFallbackContent, isBridgeNothingToSendFinal, shouldEmitEmptyCompletedBridgeFallback, shouldSuppressBridgeEmit, shouldSuppressStructuredFallback, structuredFallbackKind, stripTrailingBridgeSentinelLine, stripTrailingOaiMemoryCitation, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
+import { codexStatusLineSetupNotice } from './services/codex-statusline-config.js';
 import { buildSubmitMessagePreview } from './services/submit-notification.js';
 import {
   decideHardTimeoutAction,
@@ -218,6 +219,7 @@ import {
 } from './services/bridge-rotation-policy.js';
 import { CodexBridgeQueue, pruneExpiredPreStartHeadsAndEmit } from './services/codex-bridge-queue.js';
 import { detectCodexComposerState } from './services/codex-composer-state.js';
+import { refreshCodexTerminalSession, codexTerminalSessionIsBound, prepareCodexTerminalStatusLine } from './services/codex-terminal-session.js';
 import {
   generateCodexAppThreadTitle,
   readCodexAppThreadMetadata,
@@ -7343,6 +7345,11 @@ function currentCodexObservedPid(): number | undefined {
 }
 
 /** Ownership gate for binding a Codex bridge to a session id that came from the
+ *  shared history. A live thread-id footer proves a daemon-backed TUI's
+ *  exact thread for this backend generation; otherwise retain the legacy fd
+ *  membership gate below. Never consult the shared daemon's combined fd set.
+ *
+ *  Legacy ownership gate for a session id that came from the
  *  GLOBAL history.jsonl. That file is shared by every Codex pane under one
  *  CODEX_HOME, so a concurrent sibling pane submitting identical text can make
  *  writeInput's history match return a FOREIGN session id. Before attaching (or
@@ -7359,6 +7366,7 @@ function currentCodexObservedPid(): number | undefined {
  *  AND the initial-attach guard) call this one wrapper — there is no parallel
  *  decision copy that could drift. */
 function codexHistorySidOwnedByCurrentPid(cliSessionId: string): boolean {
+  if (backend && codexTerminalSessionIsBound(backend, cliSessionId)) return true;
   const pid = currentCodexObservedPid();
   const ownedRollouts = pid ? findCodexRolloutSetByPid(pid) : undefined;
   const owned = codexHistorySidIsOwned(cliSessionId, ownedRollouts);
@@ -7455,12 +7463,12 @@ function codexBridgeNotifyCliSessionId(cliSessionId: string): void {
       const next = resolveFileBridgePath('codex', { sessionId: cliSessionId });
       if (next && next !== codexBridgeRolloutPath) {
         const attachMode = codexBridgeUsesSplitLiveAttach() ? 'split-live' : 'fresh-empty';
-        log(`Codex session binding corrected ${currentSid ?? '?'} → ${cliSessionId} (pid ${pid} owns it); re-attaching bridge to ${next}`);
+        log(`Codex session binding corrected ${currentSid ?? '?'} → ${cliSessionId} (terminal pid ${pid} verified); re-attaching bridge to ${next}`);
         codexBridgeDetachFile();
         codexBridgePendingSessionId = undefined;
         codexBridgeAttach(next, attachMode);
       } else if (!next) {
-        log(`Codex session binding corrected ${currentSid ?? '?'} → ${cliSessionId} (pid ${pid} owns it); waiting for rollout`);
+        log(`Codex session binding corrected ${currentSid ?? '?'} → ${cliSessionId} (terminal pid ${pid} verified); waiting for rollout`);
         codexBridgeDetachFile();
         codexBridgePendingSessionId = cliSessionId;
         codexBridgeStartTimer();
@@ -13523,7 +13531,7 @@ function stopScreenUpdates(): void {
 
 // ─── PTY Management ──────────────────────────────────────────────────────────
 
-function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
+async function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init' }>): Promise<void> {
   if (cfg.bridgeJsonlPath) {
     startBridgeWatcher(cfg.bridgeJsonlPath, {
       cliPid: cfg.adoptCliPid,
@@ -13534,7 +13542,17 @@ function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init'
     codexAdoptStartMs = adoptStartMs;
     codexBridgeQueue.setLocalTurns(true, adoptStartMs);
     let rolloutPath: string | undefined;
-    if (cfg.cliSessionId) rolloutPath = findCodexRolloutBySessionId(cfg.cliSessionId);
+    const terminalSession = backend ? await refreshCodexTerminalSession(backend) : undefined;
+    if (terminalSession?.kind === 'unavailable' && backend) {
+      const setup = prepareCodexTerminalStatusLine(backend);
+      if (setup) send({ type: 'user_notify', message: codexStatusLineSetupNotice(setup) });
+    }
+    const initialSessionId = terminalSession?.kind === 'terminal' ? terminalSession.sessionId
+      : terminalSession?.kind === 'unavailable' ? undefined : cfg.cliSessionId;
+    if (initialSessionId) {
+      rolloutPath = findCodexRolloutBySessionId(initialSessionId);
+      persistCliSessionId(initialSessionId);
+    }
     if (!rolloutPath && cfg.adoptCliPid) {
       const probed = findCodexRolloutByPid(cfg.adoptCliPid);
       if (probed) {
@@ -13545,7 +13563,7 @@ function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init'
     if (rolloutPath) {
       codexBridgeAttach(rolloutPath, 'split-live');
     } else {
-      if (cfg.cliSessionId) codexBridgePendingSessionId = cfg.cliSessionId;
+      if (initialSessionId) codexBridgePendingSessionId = initialSessionId;
       codexAdoptPendingPid = cfg.adoptCliPid;
       codexBridgeStartTimer();
     }
@@ -13995,7 +14013,7 @@ async function spawnCli(
     wireHerdrWebTerminalRelays(herdrBe);
     seedBackendScreen('herdr adopt', herdrBe);
 
-    setupAdoptTranscriptBridges(cfg);
+    await setupAdoptTranscriptBridges(cfg);
     setupAdoptInputAdapter(cfg);
     setupAdoptIdleDetection(cfg, 'herdr');
 
@@ -14059,7 +14077,7 @@ async function spawnCli(
     // immediately, instead of waiting for the next observe tick.
     seedBackendScreen(`${effectiveBackendType} adopt`, observeBe);
 
-    setupAdoptTranscriptBridges(cfg);
+    await setupAdoptTranscriptBridges(cfg);
 
     setupAdoptIdleDetection(cfg, 'pipe');
     setupAdoptInputAdapter(cfg);
