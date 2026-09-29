@@ -69,6 +69,9 @@ import {
   disableAutostart,
   autostartStatus,
   refreshAutostart,
+  clearWatchdogStopped,
+  markWatchdogStopped,
+  watchdogStopRequested,
 } from './autostart.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
 import { writeBotsJsonAtomic as writeBotsAtomic } from './setup/bots-store.js';
@@ -2621,6 +2624,8 @@ function applyCompanionOptions(argv: string[]): void {
   });
 }
 
+let watchdogStart = false;
+
 async function cmdStart(): Promise<void> {
   // FIRST STATEMENT, before any await or dependency probe: those run as child
   // processes and would inherit the marker. See consumeAutostartUnitMarker.
@@ -2636,12 +2641,41 @@ async function cmdStart(): Promise<void> {
     process.exit(1);
   }
   ensureConfigDir();
+  if (watchdogStart) {
+    // The periodic path must stay local and cheap while healthy. In particular,
+    // do not run dependency installers or one credential request per bot every
+    // 30 seconds merely to discover that the supervisor is already alive.
+    if (watchdogStopRequested(CONFIG_DIR)) return;
+    const { liveSupervisorPid } = await import('./core/fleet-runtime.js');
+    let pid: number | undefined;
+    try {
+      pid = liveSupervisorPid();
+    } catch (err) {
+      // Unverifiable fleet-state (e.g. identity fields missing in a stale or
+      // half-written state file) is fail-closed for start — but the watchdog
+      // tick must not exit non-zero over it every 30s. Log, skip this tick
+      // (exit 0), retry next tick. Do NOT fall through to a full start: it
+      // throws on the same liveness check after paying the preflight cost.
+      logger.warn(`[watchdog] 跳过本次探活(fleet 状态不可核验，下个 tick 重试): ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    if (pid !== undefined) return;
+  } else {
+    // An explicit start (including the enabled boot unit) overrides a previous
+    // explicit stop and re-arms crash recovery.
+    clearWatchdogStopped(CONFIG_DIR);
+  }
   await ensureSystemDependencies();
 
   const botsForCheck = await preflightConfiguredBotCredentials();
   // The boot hook marks itself so purely presentational waiting can be skipped
   // there (see startConfiguredFleet).
-  await startConfiguredFleet(botsForCheck, { bootHookStart });
+  await startConfiguredFleet(botsForCheck, { bootHookStart, watchdogStart });
+}
+
+async function cmdWatchdog(): Promise<void> {
+  watchdogStart = true;
+  await cmdStart();
 }
 
 /** Validate before systemd handoff so a predictable failure cannot stop the old fleet. */
@@ -2680,11 +2714,19 @@ async function preflightConfiguredBotCredentials() {
 
 async function startConfiguredFleet(
   botsForCheck: ReturnType<typeof loadBotsJson>,
-  options: { bootHookStart?: boolean } = {},
+  options: { bootHookStart?: boolean; watchdogStart?: boolean } = {},
 ): Promise<void> {
+  let skippedForIntentionalStop = false;
 
   await withFileLock(PM2_FLEET_MUTATION_LOCK_TARGET, async () => {
     await withFileLock(BOTS_JSON_FILE, async () => {
+      // Re-check under the fleet mutation lock. This closes the race where an
+      // operator runs `botmux stop` after the watchdog's initial cheap check but
+      // before it reaches the actual spawn.
+      if (options.watchdogStart && watchdogStopRequested(CONFIG_DIR)) {
+        skippedForIntentionalStop = true;
+        return;
+      }
       const lockedBots = loadBotsJson();
       if (JSON.stringify(lockedBots) !== JSON.stringify(botsForCheck)) {
         throw new Error('[start] bots.json changed during credential preflight; retry with the new configuration');
@@ -2713,6 +2755,7 @@ async function startConfiguredFleet(
       }
     }, { maxWaitMs: 5_000 });
   }, { maxWaitMs: 5_000 });
+  if (skippedForIntentionalStop) return;
   await reconcilePluginServicesForCli(undefined, {
     autoOnly: true,
   });
@@ -2804,26 +2847,45 @@ function cleanupLegacyPm2(_op?: 'stop' | 'restart'): boolean {
 async function cmdStop(): Promise<void> {
   const includePluginServices = process.argv.includes('--with-plugin');
   ensureConfigDir();
-  await withFileLock(PM2_FLEET_MUTATION_LOCK_TARGET, async () => {
-    cleanupLegacyPm2('stop'); // reap any pre-migration pm2 God still holding botmux procs
-    const { stopFleet } = await import('./core/fleet-runtime.js');
-    const result = stopFleet();
-    if (result.action === 'not-running') {
+  // Persist intent before taking the fleet lock so a concurrently-fired
+  // watchdog cannot resurrect the fleet after this stop completes.
+  // If the stop demonstrably did NOT happen (lock never acquired, or the
+  // supervisor outlived its stop window), the marker is dropped again below:
+  // a half-stopped fleet must keep healing instead of being suppressed forever.
+  // Only a confirmed stop (or an untouched idle fleet) keeps the marker.
+  markWatchdogStopped(CONFIG_DIR);
+  try {
+    await withFileLock(PM2_FLEET_MUTATION_LOCK_TARGET, async () => {
+      cleanupLegacyPm2('stop'); // reap any pre-migration pm2 God still holding botmux procs
+      const { stopFleet } = await import('./core/fleet-runtime.js');
+      const result = stopFleet();
+      if (result.action === 'not-running') {
+        cleanupStaleDaemonDescriptors();
+        if (includePluginServices) await stopPluginServicesForCli(undefined, { autoOnly: true });
+        console.log('daemon 未在运行。');
+        return;
+      }
+      if (result.action === 'timeout') {
+        // SIGKILL sent but exit unconfirmed: the supervisor may still be
+        // alive, so drop the stop intent before surfacing the failure.
+        clearWatchdogStopped(CONFIG_DIR);
+        throw new Error(
+          `[stop] supervisor (pid ${result.supervisorPid}) 未在超时时间内退出；已发送 SIGKILL，`
+          + `请用 \`botmux status\` 复核 fleet 状态。`,
+        );
+      }
       cleanupStaleDaemonDescriptors();
       if (includePluginServices) await stopPluginServicesForCli(undefined, { autoOnly: true });
-      console.log('daemon 未在运行。');
-      return;
+      console.log(`✅ daemon 已停止 (supervisor pid ${result.supervisorPid})`);
+    }, { maxWaitMs: 5_000 });
+  } catch (err) {
+    // The fleet was never touched when the lock could not be acquired;
+    // errors thrown after a successful stop keep the marker (intent stands).
+    if (err instanceof FileLockTimeoutError) {
+      clearWatchdogStopped(CONFIG_DIR);
     }
-    if (result.action === 'timeout') {
-      throw new Error(
-        `[stop] supervisor (pid ${result.supervisorPid}) 未在超时时间内退出；已发送 SIGKILL，`
-        + `请用 \`botmux status\` 复核 fleet 状态。`,
-      );
-    }
-    cleanupStaleDaemonDescriptors();
-    if (includePluginServices) await stopPluginServicesForCli(undefined, { autoOnly: true });
-    console.log(`✅ daemon 已停止 (supervisor pid ${result.supervisorPid})`);
-  }, { maxWaitMs: 5_000 });
+    throw err;
+  }
 }
 
 async function cmdRestart(): Promise<void> {
@@ -2835,6 +2897,7 @@ async function cmdRestart(): Promise<void> {
     process.exit(1);
   }
   ensureConfigDir();
+  clearWatchdogStopped(CONFIG_DIR);
   await withFileLock(PM2_FLEET_MUTATION_LOCK_TARGET, async () => {
     // Report recovery guidance before any live-fleet mutation. The locked
     // check below repeats against the exact generation used for restart.
@@ -16018,6 +16081,7 @@ switch (command) {
   }
   case 'clone': await cmdClone(process.argv.slice(3)); break;
   case 'start':   await cmdStart(); break;
+  case '__watchdog': await cmdWatchdog(); break;
   case 'serve':   await cmdServe(process.argv.slice(3)); break;
   case 'start-bot': await cmdStartBot(process.argv.slice(3)); break;
   case 'stop-bot': await cmdStopBot(process.argv.slice(3)); break;
