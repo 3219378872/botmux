@@ -1363,7 +1363,7 @@ export function compileToBwrap(policy: FsPolicy, opts: CompileBwrapOpts): BwrapC
 // ───────────────────────────── legacy config migration ───────────────────────
 
 export interface LegacySandboxFields {
-  sandbox?: boolean;
+  sandbox?: boolean | 'off' | 'oncall' | 'scratch';
   readIsolation?: boolean;
   sandboxReadonlyPaths?: readonly string[];
   sandboxHidePaths?: readonly string[];
@@ -1371,7 +1371,9 @@ export interface LegacySandboxFields {
 }
 
 export interface MigratedSandboxFields {
-  sandbox: boolean;
+  // Tri-state preserved: a scratch bot carrying legacy path fields must NOT
+  // be silently downgraded to oncall(boolean true) by the migration.
+  sandbox: boolean | 'oncall' | 'scratch';
   sandboxPaths?: { readWrite?: string[]; readOnly?: string[]; deny?: string[] };
 }
 
@@ -1388,7 +1390,14 @@ export function migrateLegacySandboxFields(entry: LegacySandboxFields & { sandbo
     || (entry.sandboxReadonlyPaths?.length ?? 0) > 0
     || (entry.sandboxHidePaths?.length ?? 0) > 0
     || (entry.readDenyExtraPaths?.length ?? 0) > 0;
-  const sandbox = entry.sandbox === true || entry.readIsolation === true;
+  // Preserve the tri-state: only oncall representations collapse to boolean
+  // true; 'scratch' passes through unchanged (the old path lists are irrelevant
+  // to scratch's full-root COW, but the mode itself must not be downgraded).
+  const sandbox: boolean | 'oncall' | 'scratch' = entry.sandbox === 'scratch'
+    ? 'scratch'
+    : (entry.sandbox === true
+      || entry.sandbox === 'oncall'
+      || entry.readIsolation === true);
   if (!hasLegacy) return null; // plain `sandbox: true` needs no path migration
   const readOnly = [...(entry.sandboxReadonlyPaths ?? [])];
   const deny = [...(entry.sandboxHidePaths ?? []), ...(entry.readDenyExtraPaths ?? [])];
