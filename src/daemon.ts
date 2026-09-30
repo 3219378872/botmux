@@ -628,7 +628,7 @@ import {
 import { emitSessionLifecycleHook } from './services/session-lifecycle-hooks.js';
 import { botAutoWorktreeEnabled } from './services/default-worktree.js';
 import { createRepoWorktree, isGitWorkTree } from './services/git-worktree.js';
-import { escapeXmlText } from './utils/xml.js';
+import { escapeXmlAttr, escapeXmlText } from './utils/xml.js';
 import {
   setCardDispatcher as setAskCardDispatcher,
   setCanTalkChecker as setAskCanTalkChecker,
@@ -2367,7 +2367,7 @@ function vcMeetingTargetOpenId(larkAppId: string, cfg: VcMeetingAgentConfig): st
 }
 
 function randomVcMeetingNonce(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return randomUUID();
 }
 
 function vcMeetingInviteTtlMs(cfg: VcMeetingAgentConfig): number {
@@ -11016,7 +11016,7 @@ async function submitVcMeetingOutputRequestImpl(input: {
 
   const now = Date.now();
   const req: VcMeetingPendingOutputRequest = {
-    id: `out_${input.channel}_${now.toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    id: `out_${input.channel}_${randomUUID()}`,
     channel: input.channel,
     nonce: randomVcMeetingNonce(),
     agentAppId: session.selectedAgentAppId,
@@ -19990,9 +19990,9 @@ async function buildIndependentPublicContext(ds: DaemonSession): Promise<string>
       .filter(item => item.senderType === 'user' && item.msgType !== 'interactive' && item.content.trim())
       .slice(-CROSS_PRINCIPAL_PUBLIC_CONTEXT_LIMIT)
       .map(item => {
-        const who = escapeXmlText(item.senderName ?? item.senderId ?? 'unknown');
+        const who = escapeXmlAttr(item.senderName ?? item.senderId ?? 'unknown');
         const body = escapeXmlText(item.content);
-        return `  <message sender="${who}" message_id="${escapeXmlText(item.messageId)}">${body}</message>`;
+        return `  <message sender="${who}" message_id="${escapeXmlAttr(item.messageId)}">${body}</message>`;
       });
     if (rows.length === 0) return '';
     return [
