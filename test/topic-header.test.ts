@@ -10,7 +10,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { parseTopicHeader, parseTopicHeaderWithLifecycleAliases, isTopicHeader, topicHeaderDeclaresSpec, type TopicHeaderParse } from '../src/core/topic-header.js';
+import { parseTopicHeader, isTopicHeader, topicHeaderDeclaresSpec, type TopicHeaderParse } from '../src/core/topic-header.js';
 
 /** 头部对象的可断言快照（省掉 ok/sentinel 噪音，直接比语义三件套）。 */
 function shape(parsed: TopicHeaderParse) {
@@ -153,23 +153,6 @@ describe('parseTopicHeader —— 空白不敏感（D2）', () => {
       directives: {},
       prompt: '拉一下时间线',
     });
-  });
-});
-
-describe('parseTopicHeaderWithLifecycleAliases —— 生命周期别名', () => {
-  it('/th /tw 复用标准头部解析，非法指令保持 fail-closed', () => {
-    expect(shape(parseTopicHeaderWithLifecycleAliases('/th /model'))).toEqual({
-      ok: false, kind: 'missing_arg', directive: 'model',
-    });
-    expect(shape(parseTopicHeaderWithLifecycleAliases('/tw /effort'))).toEqual({
-      ok: false, kind: 'missing_arg', directive: 'effort',
-    });
-    expect(shape(parseTopicHeaderWithLifecycleAliases('/tw 修复登录'))).toEqual({
-      title: undefined, directives: {}, prompt: '修复登录',
-    });
-    // 别名不再把行首 /th /tw 改写成 /t，否则 lifecycle 会丢。
-    expect(parseTopicHeaderWithLifecycleAliases('/tw 修复登录')).toMatchObject({ lifecycle: 'worktree', sentinel: '/tw' });
-    expect(parseTopicHeaderWithLifecycleAliases('/th /model')).toMatchObject({ ok: false, sentinel: '/th' });
   });
 });
 
