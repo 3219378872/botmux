@@ -28294,10 +28294,10 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       ),
       handleNewTopic: (data, ctx) => handleNewTopic(data, ctx),
       handleThreadReply: (data, ctx) => handleThreadReply(data, ctx),
-      validateTopicHeader: (header, appId) => resolveTopicSpec(header, {
+      validateTopicHeader: async (header, appId) => (await resolveTopicSpec(header, {
         botCfg: getBot(appId).config,
         scanDirs: getProjectScanDirsForBot(appId),
-      }).ok,
+      })).ok,
       handlePrincipalLaneMessage: (data, ctx, ownsSession) =>
         handlePrincipalLaneLiveMessage(data, ctx, ownsSession),
       handleBotAdded: (chatId, operatorOpenId, appId) => withBotTurnAdmission(

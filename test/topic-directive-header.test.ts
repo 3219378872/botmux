@@ -793,7 +793,7 @@ describe('指令头与授权闸（restrictGrantCommands）', () => {
     const ctx: any = {
       chatId: GROUP, messageId, chatType: 'group', scope: 'chat', anchor: GROUP, larkAppId: APP,
     };
-    const flipped = maybeApplyForceTopicOverride(ctx, ev.message, messageId, APP);
+    const flipped = await maybeApplyForceTopicOverride(ctx, ev.message, messageId, APP);
     await handleThreadReply(ev, ctx as RoutingContext);
     return { flipped };
   }

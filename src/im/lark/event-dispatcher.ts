@@ -2853,7 +2853,7 @@ export interface EventHandlers {
   handleThreadReply: (data: any, ctx: RoutingContext) => Promise<void>;
   /** Validate a syntactically valid topic header before routing mutates scope.
    * The daemon supplies the same semantic resolver used by handleNewTopic. */
-  validateTopicHeader?: (header: import('../../core/topic-header.js').TopicHeader, larkAppId: string) => boolean;
+  validateTopicHeader?: (header: import('../../core/topic-header.js').TopicHeader, larkAppId: string) => boolean | Promise<boolean>;
   /** Optional live principal-lane adapter. It runs after dispatcher trust and
    * message-shape gates but before the legacy chat-anchor serializer. Returning
    * false preserves the legacy path byte-for-byte. */
@@ -3011,22 +3011,22 @@ function stripHeaderMentions(rawText: string, message: any, larkAppId: string): 
  * Already-thread messages (real Lark 话题, p2p, 话题群) are left alone:
  * the prefix is still stripped downstream by handleNewTopic.
  */
-export function maybeApplyForceTopicOverride(
+export async function maybeApplyForceTopicOverride(
   routing: { scope: 'thread' | 'chat'; anchor: string; forceTopicApplied?: boolean },
   message: any,
   messageId: string,
   larkAppId: string,
-  validateTopicHeader?: (header: import('../../core/topic-header.js').TopicHeader, larkAppId: string) => boolean,
-): boolean {
+  validateTopicHeader?: (header: import('../../core/topic-header.js').TopicHeader, larkAppId: string) => boolean | Promise<boolean>,
+): Promise<boolean> {
   if (routing.scope !== 'chat') return false;
   const rawText = extractMessageTextForRouting(message);
   if (!rawText) return false;
   const stripped = stripHeaderMentions(rawText, message, larkAppId);
   // 指令头（`[标题] /t …`）与生命周期别名 `/th` `/tw` 走同一条判定。语法与
   // 完整规格都校验成功后才能翻 scope；否则错误必须留在原 chat 中，不能先产生
-  // 新话题副作用。
+  // 新话题副作用。规格校验（resolveTopicSpec）要查本地 git，所以这里是 async。
   const header = parseTopicHeader(stripped);
-  if (!isTopicHeader(header) || (validateTopicHeader && !validateTopicHeader(header, larkAppId))) return false;
+  if (!isTopicHeader(header) || (validateTopicHeader && !await validateTopicHeader(header, larkAppId))) return false;
   routing.scope = 'thread';
   routing.anchor = messageId;
   // 把「这条路由是 `/t` 翻出来的」记在 ctx 上，让下游 handler 能对**它自己没做过的
@@ -4219,7 +4219,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         // brand-new {thread, messageId} anchor. forceTopicApplied also suppresses
         // the shared-topic fold below — a `/t` seed wins over shared, same
         // precedence as the human path.
-        const forcedTopic = maybeApplyForceTopicOverride(ctx, message, messageId, larkAppId, handlers.validateTopicHeader);
+        const forcedTopic = await maybeApplyForceTopicOverride(ctx, message, messageId, larkAppId, handlers.validateTopicHeader);
         if (forcedTopic) {
           logger.info(`[/t] Force-topic override (bot sender): msg=${messageId.substring(0, 12)} → thread-scope, anchor=msg`);
         }
@@ -4572,7 +4572,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       // is currently active in this chat.
       const forceTopicApplied = substituteTrigger
         ? false
-        : maybeApplyForceTopicOverride(routing, message, messageId, larkAppId, handlers.validateTopicHeader);
+        : await maybeApplyForceTopicOverride(routing, message, messageId, larkAppId, handlers.validateTopicHeader);
       if (forceTopicApplied) {
         logger.info(`[/t] Force-topic override: msg=${messageId.substring(0, 12)} → thread-scope, anchor=msg`);
       }
