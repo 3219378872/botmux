@@ -165,18 +165,24 @@ function escSb(p: string): string {
  *  4. mcp socket literal grants
  *  5. fileDenyPaths — file/subtree credential denies + symlink-degraded
  *     subtree write-denies + user denies, emitted LAST so they always win. */
-/** macOS lark-cli keystore absolute paths that must be read+write denied
+/** macOS lark-cli keystore ABSOLUTE paths that must be read+write denied
  *  inside scratch (the shared master.key + every appsecret_*.enc, and the
  *  per-bot lark-cli config). These live OUTSIDE ~/.botmux so the authority-
  *  root seal does not cover them; the Linux enumerator resolves different
- *  (~/.local/share) paths, hence the platform-specific helper. Only paths
- *  that exist are returned (the Seatbelt compiler/prepare filters anyway). */
+ *  (~/.local/share) paths, hence the platform-specific helper.
+ *
+ *  Returned UNCONDITIONALLY (no existence filter): the Sealbelt rules seal
+ *  whole directories by subpath regardless of what currently exists, so the
+ *  guarantee must cover files created/renamed AFTER spawn (a future
+ *  appsecret_<newApp>.enc, the macOS master.key.file fallback, etc.), and the
+ *  real-machine probe needs the deny rule present even when it pre-creates a
+ *  marker to test against. */
 export function macLarkKeystoreDenies(homeReal: string): string[] {
   return [
     join(homeReal, 'Library', 'Application Support', 'lark-cli'),
     join(homeReal, '.lark-cli'),
     join(homeReal, '.lark-cli-bots'),
-  ].filter(p => existsSync(p));
+  ];
 }
 
 export function buildMacScratchProfile(input: {

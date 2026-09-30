@@ -115,11 +115,14 @@ describe('macLarkKeystoreDenies (N1: scratch must seal macOS lark-cli keys)', ()
   // Pure shape test (paths are existence-filtered, so on a Linux CI box none
   // exist and the list is empty — but the CANDIDATE shape is asserted here;
   // the real content assertion runs in the macOS darwin probe).
-  it('names the three macOS keystore locations for a given home', () => {
-    // Temporarily stub existsSync-independent path derivation by checking the
-    // raw candidate set through a home whose lark dirs we create is impossible
-    // cross-platform, so assert the helper filters missing paths to [] here.
-    expect(macLarkKeystoreDenies('/nonexistent-probe-home-xyz')).toEqual([]);
+  it('unconditionally names the three macOS keystore directories (existence-independent)', () => {
+    // Directory denies seal by subpath regardless of what exists, so they must
+    // be emitted even for a missing home — covers files created after spawn.
+    expect(macLarkKeystoreDenies('/Users/u')).toEqual([
+      '/Users/u/Library/Application Support/lark-cli',
+      '/Users/u/.lark-cli',
+      '/Users/u/.lark-cli-bots',
+    ]);
   });
 
   it('buildMacScratchProfile emits lark keystore denies read+write in stage 5', () => {

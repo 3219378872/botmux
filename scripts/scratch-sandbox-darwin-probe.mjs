@@ -13,9 +13,9 @@
  */
 // @ts-nocheck
 import { prepareMacScratchSandbox } from '../dist/adapters/backend/scratch-sandbox-darwin.js';
-import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir, tmpdir as osTmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 if (process.platform !== 'darwin') {
@@ -98,14 +98,46 @@ try {
   const rRead = run('ls "$HOME" >/dev/null && echo READ_OK');
   check('reads work through the farm', rRead.stdout.includes('READ_OK'));
 
-  // 7. macOS lark-cli keystores are sealed (N1). Read-only assertion — never
-  //    writes the real keystore; only verifies a pre-existing master.key is
-  //    not readable from inside the sandbox. Skipped when absent (fresh mac).
-  for (const rel of ['Library/Application Support/lark-cli/master.key', '.lark-cli/config.json']) {
-    const hostPath = join(homedir(), rel);
-    if (!existsSync(hostPath)) continue;
-    const out = run(`if [ -f "$HOME/${rel}" ]; then if cat "$HOME/${rel}" >/dev/null 2>&1; then echo LEAKED; else echo SEALED; fi; else echo ABSENT; fi`);
-    check(`mac lark keystore sealed: ${rel}`, out.stdout.includes('SEALED') || out.stdout.includes('ABSENT'), out.stdout.trim().slice(0, 40));
+  // 7. macOS lark-cli keystores are sealed (N1). Non-vacuous assertion:
+  //    existence is checked on the HOST (outside the sandbox) because
+  //    Seatbelt file-read* denial also blocks stat/metadata — an in-sandbox
+  //    `[ -f ]` on a sealed path ALWAYS fails and can't distinguish "sealed"
+  //    from "absent". Only when the host confirms a real secret exists do we
+  //    require the in-sandbox read to fail (= SEALED). The primary target is
+  //    an appsecret_*.enc CIPHERTEXT file (always a file on macOS; the master
+  //    key itself usually lives in the system Keychain and master.key.file is
+  //    only a fallback). A machine with no keystore SKIPs (never silently green).
+  const larkAppSupportDir = join(homedir(), 'Library', 'Application Support', 'lark-cli');
+  const encFiles = existsSync(larkAppSupportDir)
+    ? readdirSync(larkAppSupportDir).filter(n => /^appsecret_.*\.enc$/.test(n))
+    : [];
+  const targets = [
+    ...encFiles.slice(0, 1).map(n => ({ rel: join('Library', 'Application Support', 'lark-cli', n), kind: 'appsecret ciphertext', required: true })),
+    { rel: 'Library/Application Support/lark-cli/master.key.file', kind: 'macOS master-key file fallback', required: false },
+    { rel: '.lark-cli/config.json', kind: 'per-bot lark-cli config', required: false },
+  ];
+  let sealedAny = false;
+  for (const t of targets) {
+    const hostPath = join(homedir(), t.rel);
+    if (!existsSync(hostPath)) {
+      console.log(`   SKIP ${t.kind} (not present on host): ${t.rel}`);
+      continue;
+    }
+    // In-sandbox read of a host-confirmed secret path must fail. cat returns
+    // non-zero / no output when file-read* is denied; success = LEAK.
+    const out = run(`cat "$HOME/${t.rel}" 2>/dev/null | wc -c | tr -d ' '`);
+    const bytes = parseInt(out.stdout.trim(), 10);
+    const ok = Number.isFinite(bytes) && bytes === 0;
+    if (ok) sealedAny = true;
+    check(`mac lark keystore sealed: ${t.kind} (${basename(t.rel)})`, ok, `readable bytes=${out.stdout.trim()}`);
+  }
+  if (encFiles.length === 0) {
+    // No ciphertext on this machine → the N1 content guarantee can't be proven
+    // here. Report loudly (probe exit non-zero) so it must be re-run on a mac
+    // with a real provisioned lark-cli rather than passing vacuously.
+    check('host has at least one real appsecret_*.enc to prove sealing', false, 're-run this probe on a Mac provisioned with lark-cli');
+  } else {
+    check('at least one real ciphertext was proven sealed', sealedAny);
   }
 } finally {
   // Guarantee cleanup even if an assert/read throws — otherwise a failed probe
