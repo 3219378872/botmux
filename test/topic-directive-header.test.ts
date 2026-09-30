@@ -15,8 +15,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { execSync } from 'node:child_process';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 const mocks = vi.hoisted(() => {
   const dataDir = `${process.env.TMPDIR ?? '/tmp'}/botmux-topic-header-${process.pid}`;
@@ -943,19 +943,22 @@ describe('指令头：/repo wt 建 worktree 再开会话', () => {
     expect(mocks.forkWorker).not.toHaveBeenCalled();
     expect(mocks.runAutoWorktreeCommit).toHaveBeenCalledTimes(1);
     const args = mocks.runAutoWorktreeCommit.mock.calls[0][0];
+    const expectedWorktreePath = join(dirname(realpathSync(botmuxRepo)), 'botmux-ci-temp_split');
     expect(args).toMatchObject({
       baseDir: botmuxRepo,
       force: true,
       branch: 'ci/temp_split',
+      worktreePath: expectedWorktreePath,
       title: '日常运维',
     });
-    expect(args.worktreePath).toBeUndefined();
     expect(args.reuseExisting).toBeUndefined();
     expect(String(args.prompt)).toContain('简单确认下 bun 版本');
     const ds = args.ds;
     expect(ds.pendingRepo).toBe(true);
     expect(ds.workingDir).toBe(botmuxRepo);
-    expect(ds.session.pendingRepoSetup).toMatchObject({ mode: 'auto_worktree', baseDir: botmuxRepo, force: true, branch: 'ci/temp_split' });
+    expect(ds.session.pendingRepoSetup).toMatchObject({
+      mode: 'auto_worktree', baseDir: botmuxRepo, force: true, branch: 'ci/temp_split', worktreePath: expectedWorktreePath,
+    });
     expect(ds.spawnModelOverride).toBe('sonnet');
     expect(ds.session.title).toBe('日常运维');
     expect(ds.scope).toBe('thread');
