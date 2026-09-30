@@ -3487,6 +3487,8 @@ export async function handleCommand(
         break;
       }
 
+      // 两条入口在 classifySlash 之后直接派发 /sessions，进不到这个 case。
+      // 留着是 schema↔switch 对齐守卫的锚点，删了测试会红。
       case '/sessions': {
         const chatId = ds?.chatId ?? message.chatId ?? '';
         await handleGroupSessionsCommand(message, rootId, chatId, deps, larkAppId);
@@ -5590,6 +5592,7 @@ export async function handleCommand(
         break;
       }
 
+      // 前置特判已派发 /card。case 是 schema↔switch 对齐守卫的锚点，两条入口都不可达。
       case '/card': {
         // Existing-session path. New topics route /card via handleCardCommand at
         // the router (so no phantom session is created). off/on work without a
@@ -5604,6 +5607,7 @@ export async function handleCommand(
         break;
       }
 
+      // 前置特判已派发 /cot。case 是 schema↔switch 对齐守卫的锚点，两条入口都不可达。
       case '/cot': {
         // Existing-session path. New topics route /cot via handleCotCommand at
         // the router (so no phantom session is created). All subcommands work
@@ -5684,6 +5688,7 @@ export async function handleCommand(
         break;
       }
 
+      // 前置特判已派发 /term。case 是 schema↔switch 对齐守卫的锚点，两条入口都不可达。
       case '/term': {
         // Existing-session path. New topics route /term via handleTermLinkCommand
         // at the router (daemon.ts) so no phantom worker=null session is created.

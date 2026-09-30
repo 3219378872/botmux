@@ -22333,7 +22333,12 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
       ...(sharedWorktree ? { ...sharedWorktree, reuseExisting: true } : {}),
       // 头部 `/repo wt` 与 `/tw` 同形落盘：daemon 若在创建窗口内重启，restore 按 force+branch
       // 重建；分支目录已存在时 fail closed 停在 pendingRepo，用 `/repo <路径>` 选即可。
-      ...(headerWorktree ? { force: true, ...(headerWorktree.branch ? { branch: headerWorktree.branch } : {}) } : {}),
+      ...(headerWorktree ? {
+        force: true,
+        ...(headerWorktree.branch ? { branch: headerWorktree.branch } : {}),
+        // 开话题前算过、并做过 existsSync 的那条路径。创建时用它，避免校验和落盘各算一次。
+        ...(headerWorktree.targetPath ? { worktreePath: headerWorktree.targetPath } : {}),
+      } : {}),
       // Persisted turn identity feeds the eventual fork's turnId; it must be the
       // reply anchor so provenance (quoteTargetId === marker.turnId) holds on
       // session-group first turns that go through the repo picker / worktree.
@@ -22364,6 +22369,7 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
       force: forceTopicMode === 'worktree' || !!headerWorktree,
       ...(sharedWorktree ? { ...sharedWorktree, reuseExisting: true } : {}),
       ...(headerWorktree?.branch ? { branch: headerWorktree.branch } : {}),
+      ...(headerWorktree?.targetPath ? { worktreePath: headerWorktree.targetPath } : {}),
     });
     return;
   }

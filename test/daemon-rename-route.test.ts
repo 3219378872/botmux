@@ -3777,11 +3777,13 @@ describe('/repo trusted sibling production routing', () => {
 /**
  * runtime 级联定序器（docs/design/2026-09-11-command-router.md §6，PR-3）：thread + 活 worker 上
  * 「透传命令行 ⏎ …」逐条送出，每条之间等 CLI 执行完；后端跑不了时 fail closed。
- * 只钉透传项的顺序与 turn 标识；正文项的重入走与普通消息相同的链路，由既有用例覆盖。
+ * 透传链钉顺序与 turn 标识；「命令 + 正文」另钉重入顺序，以及 worker 中途消失时停住。
  */
 describe('runtime passthrough cascade (PR-3)', () => {
   const tick = (ms: number) => new Promise(r => setTimeout(r, ms));
   beforeEach(() => {
+    resetRouteTestState();
+    activeSessions.clear();
     __testOnly_setCascadeTiming({ idleTimeoutMs: 400, busyGraceMs: 40, pollMs: 5 });
   });
 
@@ -3871,6 +3873,50 @@ describe('runtime passthrough cascade (PR-3)', () => {
     await tick(60);
     expect(raws().map((m: any) => m.content)).toEqual(['/model opus', '/clear']);
     expect(repliedText()).toContain('直接发出');
+  });
+
+  it('透传命令 + 正文：正文等命令 settled 之后才重入，一次性副作用只跑一次', async () => {
+    const learn = vi.spyOn(await import('../src/im/lark/identity-cache.js'), 'learnFromMentions');
+    const hook = vi.spyOn(await import('../src/services/hook-runner.js'), 'emitHookEvent');
+    const { ds, raws } = seedLiveThreadSession('om_root_casc_body');
+    const sent = () => (ds.worker as any).send.mock.calls.map((c: any[]) => c[0]);
+    const body = '接下来看登录';
+    await handleThreadReply(
+      makeEventData('om_casc_body', `/model opus\n${body}`, 'om_root_casc_body'),
+      makeCtx('om_root_casc_body', 'om_casc_body'),
+    );
+    await tick(15);
+    expect(raws().map((m: any) => m.content)).toEqual(['/model opus']);
+    expect(JSON.stringify(sent())).not.toContain(body);
+    ds.lastScreenStatus = 'working';
+    await tick(80);
+    expect(raws()).toHaveLength(1);
+    expect(JSON.stringify(sent())).not.toContain(body);
+    ds.cliReadyGeneration = 2;
+    ds.lastScreenStatus = 'idle';
+    await tick(80);
+    expect(raws().map((m: any) => m.content)).toEqual(['/model opus']);
+    expect(JSON.stringify(sent())).toContain(body);
+    expect(learn).toHaveBeenCalledTimes(1);
+    expect(hook.mock.calls.filter(call => call[0] === 'thread.reply')).toHaveLength(1);
+    learn.mockRestore();
+    hook.mockRestore();
+  });
+
+  it('级联途中 worker 消失：停住并提示剩余条数，不再送正文', async () => {
+    const { ds, raws } = seedLiveThreadSession('om_root_casc_gone');
+    await handleThreadReply(
+      makeEventData('om_casc_gone', '/model opus\n接下来看登录', 'om_root_casc_gone'),
+      makeCtx('om_root_casc_gone', 'om_casc_gone'),
+    );
+    await tick(15);
+    expect(raws()).toHaveLength(1);
+    ds.lastScreenStatus = 'working';
+    (ds.worker as { killed: boolean }).killed = true;
+    await tick(40);
+    expect(raws()).toHaveLength(1);
+    expect(repliedText()).toContain('剩余的 1 条没有发送');
+    expect(ds.cascadeInFlight).toBe(false);
   });
 
   it('单条透传不受影响：仍然立即以真实 messageId 送出', async () => {
