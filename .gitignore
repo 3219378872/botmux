@@ -22,6 +22,9 @@ midscene_run/
 .antigravitycli/
 .cjadk/
 .trae/
+.tmp-avatar/
+.tmp-test/
+.tmp-tests/
 # magic / 妙笔发布 token 与 app 映射（含密钥，绝不提交）
 .magic-token
 .magic-apps.json
