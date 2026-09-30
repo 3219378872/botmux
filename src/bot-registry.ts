@@ -1395,6 +1395,8 @@ export interface SessionGroupConfig {
      * 回落链见 services/feed-group-tagger.ts 的 resolveSessionTagName。
      */
     name?: string;
+    /** Destination personal feed group after successful /close. Empty = disabled. */
+    closedName?: string;
   };
   /**
    * Distinctive built-in group avatar for session groups — the zero-permission

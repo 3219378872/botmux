@@ -7383,6 +7383,7 @@ ipcRoute('GET', '/api/session-group-tag-status', async (_req, res) => {
       ...status,
       tagMode: cfg.sessionGroup?.tag?.mode ?? 'feed-group',
       tagName: cfg.sessionGroup?.tag?.name ?? '',
+      closedTagName: cfg.sessionGroup?.tag?.closedName ?? '',
       defaultTagName: defaultSessionTagName(cachedLarkAppId),
     });
   } catch (e: any) {
@@ -7392,28 +7393,32 @@ ipcRoute('GET', '/api/session-group-tag-status', async (_req, res) => {
 
 // PUT /api/session-group-tag-config — 会话群标签模式 + 标签名（Dashboard 的
 // 「会话群标签」区块，PR review：授权行必须与实际 tagMode 一致）。
-// Body `{ mode?, name? }`，两者都可单独提交（Dashboard 下拉只发 mode、输入框只发
+// Body `{ mode?, name?, closedName? }`，字段均可单独提交（Dashboard 下拉只发 mode、输入框只发
 // name），但至少要带一个：
 //   mode: 'feed-group'（默认，个人侧边栏分组，需一次 OAuth，任何租户可用）|
 //         'chat-tag'（应用租户身份，无需用户授权，但飞书尚未开放该能力，权限
 //         目录里搜不到该 scope）| 'off'
 //   name: 自定义标签名；trim 后为空 = 删掉该字段回默认名「<bot 显示名>会话」。
 //         超长按码点保守截断（clampSessionTagName），存进去的就是实际生效的。
+//   closedName: /close 后的个人消息分组名；留空 = 禁用关闭后切换。
 // 写 bots.json 的 sessionGroup.tag 并热更内存注册表，与 /botconfig 同一持久化通道。
 ipcRoute('PUT', '/api/session-group-tag-config', async (req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { mode?: unknown; name?: unknown };
-  try { body = await readJsonBody<{ mode?: unknown; name?: unknown }>(req); }
+  let body: { mode?: unknown; name?: unknown; closedName?: unknown };
+  try { body = await readJsonBody<{ mode?: unknown; name?: unknown; closedName?: unknown }>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
   const hasMode = body.mode !== undefined && body.mode !== null;
   const hasName = body.name !== undefined && body.name !== null;
+  const hasClosedName = Object.hasOwn(body, 'closedName');
   const mode = body.mode === 'chat-tag' || body.mode === 'feed-group' || body.mode === 'off'
     ? body.mode : undefined;
   if (hasMode && !mode) return jsonRes(res, 400, { ok: false, error: 'invalid_mode' });
   if (hasName && typeof body.name !== 'string') return jsonRes(res, 400, { ok: false, error: 'invalid_name' });
+  if (hasClosedName && typeof body.closedName !== 'string') return jsonRes(res, 400, { ok: false, error: 'invalid_closed_name' });
   // 一个字段都没带 → 沿用原来的 invalid_mode（老 dashboard 只发 mode，语义不变）。
-  if (!hasMode && !hasName) return jsonRes(res, 400, { ok: false, error: 'invalid_mode' });
+  if (!hasMode && !hasName && !hasClosedName) return jsonRes(res, 400, { ok: false, error: 'invalid_mode' });
   const name = hasName ? clampSessionTagName(body.name as string) : undefined;
+  const closedName = typeof body.closedName === 'string' ? clampSessionTagName(body.closedName) : undefined;
   try {
     const bot = getBot(cachedLarkAppId);
     const r = await rmwBotEntry(cachedLarkAppId, (entry: any) => {
@@ -7424,6 +7429,10 @@ ipcRoute('PUT', '/api/session-group-tag-config', async (req, res) => {
         if (name) entry.sessionGroup.tag.name = name;
         else delete entry.sessionGroup.tag.name; // 留空 = 清配置回默认，bots.json 保持干净
       }
+      if (hasClosedName) {
+        if (closedName) entry.sessionGroup.tag.closedName = closedName;
+        else delete entry.sessionGroup.tag.closedName;
+      }
       return { write: true, result: mode };
     });
     if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
@@ -7433,11 +7442,16 @@ ipcRoute('PUT', '/api/session-group-tag-config', async (req, res) => {
       if (name) tag.name = name;
       else delete tag.name;
     }
+    if (hasClosedName) {
+      if (closedName) tag.closedName = closedName;
+      else delete tag.closedName;
+    }
     bot.config.sessionGroup = { ...(bot.config.sessionGroup ?? {}), tag };
     jsonRes(res, 200, {
       ok: true,
       tagMode: tag.mode ?? 'feed-group',
       tagName: tag.name ?? '',
+      closedTagName: tag.closedName ?? '',
       defaultTagName: defaultSessionTagName(cachedLarkAppId),
     });
   } catch (e: any) {
