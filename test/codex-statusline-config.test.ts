@@ -1,16 +1,11 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { describe, expect, it } from 'vitest';
+import { copyFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import * as fs from 'node:fs';
 import { parse } from 'smol-toml';
 import {
   codexStatusLineConfigText, codexConfigPathFromProcessEnvironment,
   ensureCodexStatusLineConfig, codexStatusLineSetupNotice,
 } from '../src/services/codex-statusline-config.js';
-
-vi.mock('node:fs', async (importOriginal) => ({
-  ...await importOriginal<typeof import('node:fs')>(),
-}));
 
 let index = 0;
 function fixture(source?: string) {
@@ -21,33 +16,49 @@ function fixture(source?: string) {
   return path;
 }
 const items = (source: string): unknown => parse(source).tui;
-afterEach(() => vi.restoreAllMocks());
 
 describe('Codex statusline config editing', () => {
   it('adds an ID without changing existing items, comments, or unrelated settings', () => {
     const before = '# keep\nmodel = "custom"\n[tui] # layout\nstatus_line = [\n  "model-with-reasoning", # model\n  \'context-used\', # usage\n]\nstatus_line_use_colors = false\n[mcp_servers.example]\ncommand = "private-value"\n';
     const after = codexStatusLineConfigText(before);
-    expect(after).toBe(before.replace('status_line = [', 'status_line = ["session-id", '));
+    expect(after).toBe(before.replace("'context-used',", "'context-used', \"session-id\","));
     expect(codexStatusLineConfigText(after)).toBe(after);
   });
 
-  it.each(['session-id', 'thread-id'])('moves existing %s first and preserves comments', (id) => {
-    const before = `[tui]\nstatus_line = ["model-name", # keep model\n "${id}" # keep id\n]\n`;
+  it.each(['session-id', 'thread-id'])('moves existing %s last and preserves comments', (id) => {
+    const before = `[tui]\nstatus_line = ["${id}", # keep id\n "model-name" # keep model\n]\n`;
     const after = codexStatusLineConfigText(before);
-    expect(items(after)).toEqual({ status_line: [id, 'model-name'] });
+    expect(items(after)).toEqual({ status_line: ['model-name', id] });
     expect(after).toContain('# keep model');
     expect(after).toContain('# keep id');
     expect(codexStatusLineConfigText(after)).toBe(after);
   });
 
+  it.each([
+    '["session-id", "thread-id"]',
+    '["context-used", "session-id", "thread-id"]',
+    '["session-id", # ID\n "context-used", # context\n "thread-id", # alias\n]',
+    '[ # empty\n]',
+    '["context-used" # context\n]',
+  ])('appends exactly one ID while retaining the other items: %s', (array) => {
+    const source = `[tui]\nstatus_line=${array}`;
+    const before = parse(`items=${array}`).items;
+    if (!Array.isArray(before)) throw new Error('Expected a fixture array');
+    const ids = ['session-id', 'thread-id'];
+    const expected = [...before.filter(item => !ids.includes(String(item))), before.find(item => ids.includes(String(item))) ?? 'session-id'];
+    const after = codexStatusLineConfigText(source);
+    expect(items(after)).toEqual({ status_line: expected });
+    expect(codexStatusLineConfigText(after)).toBe(after);
+  });
+
   it('deduplicates aliases and leaves unicode items intact', () => {
     const after = codexStatusLineConfigText('[tui]\nstatus_line = ["🧪", "thread-id", "session-id", "context-used"]');
-    expect(items(after)).toEqual({ status_line: ['thread-id', '🧪', 'context-used'] });
+    expect(items(after)).toEqual({ status_line: ['🧪', 'context-used', 'thread-id'] });
   });
 
   it.each(['', '[tui]\ntheme="github"\n', '[tui]\n', '[tui]'])('preserves native defaults when status_line is absent: %s', (source) => {
     expect(items(codexStatusLineConfigText(source))).toMatchObject({
-      status_line: ['session-id', 'model-with-reasoning', 'current-dir', 'thread-name'],
+      status_line: ['model-with-reasoning', 'current-dir', 'thread-name', 'session-id'],
     });
   });
 
@@ -56,14 +67,14 @@ describe('Codex statusline config editing', () => {
   });
 
   it('supports dotted and quoted keys and bracket characters inside strings', () => {
-    expect(items(codexStatusLineConfigText('tui.status_line = ["a]b"]'))).toEqual({ status_line: ['session-id', 'a]b'] });
-    expect(items(codexStatusLineConfigText('["tui"]\n"status_line" = ["model-name"]'))).toEqual({ status_line: ['session-id', 'model-name'] });
+    expect(items(codexStatusLineConfigText('tui.status_line = ["a]b"]'))).toEqual({ status_line: ['a]b', 'session-id'] });
+    expect(items(codexStatusLineConfigText('["tui"]\n"status_line" = ["model-name"]'))).toEqual({ status_line: ['model-name', 'session-id'] });
   });
 
   it('preserves CRLF, large integers, and literal strings outside the edited setting', () => {
     const source = 'large=9223372036854775807\r\n[tui]\r\nstatus_line = ["context-used"] # keep\r\n';
     const after = codexStatusLineConfigText(source);
-    expect(after).toBe(source.replace('status_line = [', 'status_line = ["session-id", '));
+    expect(after).toBe(source.replace('["context-used"]', '["context-used", "session-id"]'));
   });
 
   it('does not confuse multiline string contents or another table with the real setting', () => {
@@ -71,7 +82,7 @@ describe('Codex statusline config editing', () => {
     const after = codexStatusLineConfigText(source);
     expect(parse(after).instructions).toBe(parse(source).instructions);
     expect(parse(after).other).toEqual(parse(source).other);
-    expect(items(after)).toEqual({ status_line: ['session-id', 'model-name'] });
+    expect(items(after)).toEqual({ status_line: ['model-name', 'session-id'] });
   });
 
   it.each(['[tui]\nstatus_line="bad"', '[tui]\nstatus_line=[1]', '[tui]\nstatus_line=[', 'tui={status_line=["model-name"]}'])('refuses invalid or unsupported layout without overwriting it: %s', (source) => {
@@ -106,12 +117,13 @@ describe('Codex statusline config editing', () => {
   it('preserves an external edit made while preparing the backup', () => {
     const path = fixture('[tui]\nstatus_line=[]');
     const edited = '# concurrent edit\n[tui]\nstatus_line=["model-name"]';
-    const copy = fs.copyFileSync;
-    vi.spyOn(fs, 'copyFileSync').mockImplementation((source, destination, mode) => {
-      copy(source, destination, mode);
-      writeFileSync(path, edited);
+    const result = ensureCodexStatusLineConfig(path, {
+      copyFile(source, destination, mode) {
+        copyFileSync(source, destination, mode);
+        writeFileSync(path, edited);
+      },
     });
-    expect(ensureCodexStatusLineConfig(path).kind).toBe('failed');
+    expect(result.kind).toBe('failed');
     expect(readFileSync(path, 'utf8')).toBe(edited);
   });
 

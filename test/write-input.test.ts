@@ -1677,7 +1677,7 @@ describe('codex writeInput submission confirmation', () => {
       cliPid: 43212, write: vi.fn(), sendText,
       captureCurrentScreen: vi.fn(() => ''),
       captureInputState: () => ({
-        viewport: `\n› Ask Codex to do anything\n\n  ${sid} · GPT-6 · Context 79% used`,
+        viewport: `\n› Ask Codex to do anything\n\n  GPT-6 · Context 79% used · ${sid} ⠋\n  ← for agents · ? for shortcuts`,
         cursor: { x: 2, y: 1 },
       }),
       pasteText(text) { pasted = text; },
@@ -1702,7 +1702,7 @@ describe('codex writeInput submission confirmation', () => {
       cliPid: 43212,
       write() { throw new Error('Unexpected raw write'); },
       captureInputState: () => ({
-        viewport: `\n› Ask Codex to do anything\n\n  ${sid} · GPT-6 · Context 79% used`,
+        viewport: `\n› Ask Codex to do anything\n\n  GPT-6 · Context 79% used · ${sid} ⠋\n  ← for agents · ? for shortcuts`,
         cursor: { x: 2, y: 1 },
       }),
       sendText(text) { calls.push(text); },
@@ -1726,13 +1726,15 @@ describe('codex writeInput submission confirmation', () => {
       cliPid: 43212,
       write: vi.fn(), pasteText: vi.fn(), sendText: vi.fn(), sendSpecialKeys: vi.fn(),
       captureInputState: () => ({
-        viewport: '\n› Ask Codex to do anything\n\n  GPT-6 · Context 79% used',
+        viewport: '\n› Ask Codex to do anything\n\n  GPT-6 · Context 79% used\n  ← for agents · ? for shortcuts',
         cursor: { x: 2, y: 1 },
       }),
     };
     const result = await createCodexAdapter('/bin/codex').writeInput(pty, 'hi');
-    expect(result).toMatchObject({ submitted: false, failureReason: expect.stringContaining('/statusline') });
-    expect(result).toMatchObject({ failureReason: expect.stringContaining('thread-id') });
+    expect(result?.submitted).toBe(false);
+    if (!result || result.submitted !== false) throw new Error('Expected a rejected submission');
+    expect(result.failureReason).toContain('/statusline');
+    expect(result.failureReason).toContain('thread-id');
     expect(pty.write).not.toHaveBeenCalled();
     expect(pty.pasteText).not.toHaveBeenCalled();
     expect(pty.sendText).not.toHaveBeenCalled();

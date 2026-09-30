@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import type { PtyHandle } from '../src/adapters/cli/types.js';
 import { findCodexRolloutSetByPid } from '../src/services/codex-transcript.js';
@@ -9,8 +10,7 @@ import {
 
 import { codexConfigPathForPid, ensureCodexStatusLineConfig } from '../src/services/codex-statusline-config.js';
 
-vi.mock('../src/services/codex-statusline-config.js', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../src/services/codex-statusline-config.js')>(),
+vi.mock('../src/services/codex-statusline-config.js', () => ({
   codexConfigPathForPid: vi.fn(),
   ensureCodexStatusLineConfig: vi.fn(),
 }));
@@ -19,7 +19,7 @@ vi.mock('../src/services/codex-transcript.js', () => ({ findCodexRolloutSetByPid
 
 const sid = '01a0ec3d-3751-7882-9b25-49bc90078561';
 const other = '01a0ec3d-3751-7882-9b25-49bc90078562';
-const idle = '\n› Ask Codex to do anything\n\n  GPT-6 · Context 79% used';
+const idle = '\n› Ask Codex to do anything\n\n  GPT-6 · Context 79% used\n  ← for agents · ? for shortcuts';
 const card = (id: string) => `/status\n╭────────────╮\n│ >_ OpenAI Codex (v0.158.0) │\n│ Server: Local background server │\n│ Model: GPT-6 │\n│ Session: ${id} │\n╰────────────╯\n${idle}`;
 
 function terminal(id = sid) {
@@ -63,6 +63,98 @@ describe('Codex terminal session identity', () => {
     expect(codexTerminalSessionIsBound(t.pty, other)).toBe(true);
     expect(t.sendText).not.toHaveBeenCalled();
     expect(t.sendSpecialKeys).not.toHaveBeenCalled();
+  });
+
+  // Two-row layouts reproduced from the Linux 0.158 review captures.
+  it.each([
+    `  GPT-6-Astra xhigh · /tmp · ${sid}\n  ← for agents · ? for shortcuts`,
+    `  GPT-6-Astra xhigh · /tmp · ${sid} ⠋\n  ← for agents · ? for shortcuts`,
+    `  ⠙ ${sid} · GPT-6 · ⠋\n  ← for agents · ? for shortcuts`,
+    `  /tmp/${other} · ${sid}\n  ← for agents · ? for shortcuts`,
+  ])('reads the two-row Codex 0.158 footer: %s', async (footer) => {
+    vi.mocked(findCodexRolloutSetByPid).mockReturnValue(new Set());
+    const t = terminal();
+    t.pty.captureInputState = () => ({
+      viewport: `Working · esc to interrupt\n› Ask Codex to do anything\n\n${footer}`,
+      cursor: { x: 2, y: 1 },
+    });
+    expect(await refreshCodexTerminalSession(t.pty)).toEqual({ kind: 'terminal', sessionId: sid });
+    expect(t.pty.write).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    `/tmp/${sid} · GPT-6`,
+    `project-${sid} · GPT-6`,
+    `${sid.slice(0, 20)}… · GPT-6`,
+    `${sid} · ${other}`,
+    `${sid} · ${sid}`,
+    `GPT-6 · Context 79% used`,
+  ])('rejects non-ID or ambiguous segments in the two-row footer: %s', async (footer) => {
+    vi.mocked(findCodexRolloutSetByPid).mockReturnValue(new Set());
+    const t = terminal();
+    t.pty.captureInputState = () => ({
+      viewport: `${other}\n› Ask Codex to do anything\n\n  ${footer}\n  ← for agents · ? for shortcuts`,
+      cursor: { x: 2, y: 1 },
+    });
+    expect(await refreshCodexTerminalSession(t.pty)).toEqual({ kind: 'unavailable' });
+    expect(codexTerminalSessionIsBound(t.pty, sid)).toBe(false);
+  });
+
+  it.each([
+    { line: '› draft at Home', x: 2, y: 0 },
+    { line: '› draft', x: 7, y: 0 },
+    { line: '› first line\n  second line', x: 13, y: 1 },
+    { line: '› 1. Update now', x: 2, y: 0 },
+  ])('does not bind or configure while the composer contains a draft or picker: %s', async ({ line, x, y }) => {
+    vi.mocked(findCodexRolloutSetByPid).mockReturnValue(new Set());
+    const t = terminal();
+    t.pty.captureInputState = () => ({
+      viewport: `${line}\n\n  GPT-6 · ${sid}\n  ← for agents · ? for shortcuts`,
+      cursor: { x, y },
+    });
+    expect(await refreshCodexTerminalSession(t.pty)).toEqual({ kind: 'unavailable' });
+    expect(prepareCodexTerminalStatusLine(t.pty)).toBeUndefined();
+    expect(ensureCodexStatusLineConfig).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    `\n\n\n\n  ${sid}`,
+    `\n  ${sid}\n  arbitrary transcript row`,
+    `\n  ${sid}\n  ← for agents\n  extra row`,
+    `\n  ${sid}\n  ← for agents · ${other}`,
+  ])('rejects misplaced, ambiguous, or unrecognized footer rows: %s', async (below) => {
+    vi.mocked(findCodexRolloutSetByPid).mockReturnValue(new Set());
+    const t = terminal();
+    t.pty.captureInputState = () => ({ viewport: `› Ask Codex to do anything\n${below}`, cursor: { x: 2, y: 0 } });
+    expect(await refreshCodexTerminalSession(t.pty)).toEqual({ kind: 'unavailable' });
+  });
+
+  it('preserves legacy behavior when rollout enumeration is unavailable', async () => {
+    vi.mocked(findCodexRolloutSetByPid).mockReturnValue(undefined);
+    const t = terminal('');
+    t.pty.captureInputState = vi.fn();
+    expect(await refreshCodexTerminalSession(t.pty)).toEqual({ kind: 'legacy' });
+    expect(t.pty.captureInputState).not.toHaveBeenCalled();
+  });
+
+  it('reads a captured macOS inline footer including native agent hints', async () => {
+    vi.mocked(findCodexRolloutSetByPid).mockReturnValue(new Set());
+    const t = terminal();
+    t.pty.captureInputState = () => ({
+      viewport: readFileSync(new URL('./fixtures/codex-footer-inline.txt', import.meta.url), 'utf8'),
+      cursor: { x: 2, y: 2 },
+    });
+    expect(await refreshCodexTerminalSession(t.pty)).toEqual({ kind: 'terminal', sessionId: sid });
+  });
+
+  it('reads an empty resumed composer with the ID at the end', async () => {
+    vi.mocked(findCodexRolloutSetByPid).mockReturnValue(new Set());
+    const t = terminal();
+    t.pty.captureInputState = () => ({
+      viewport: `› \n\n  GPT-6 · ${sid}\n  ? for shortcuts`,
+      cursor: { x: 2, y: 0 },
+    });
+    expect(await refreshCodexTerminalSession(t.pty)).toEqual({ kind: 'terminal', sessionId: sid });
   });
 
   it('keeps legacy PID ownership without querying the terminal', async () => {

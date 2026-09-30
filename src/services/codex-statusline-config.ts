@@ -22,9 +22,9 @@ const isStrings = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every(item => typeof item === 'string');
 const decode = (text: string) => parse(text, { integersAsBigInt: 'asNeeded' });
 
-/** Keep comments and unrelated item spelling while moving either ID alias first.
+/** Keep comments and unrelated item spelling while moving either ID alias last.
  * The complete TOML document is validated before and after every candidate edit. */
-function prependId(array: string, id: string): string {
+function appendId(array: string, id: string): string {
   const tokens = [...array.matchAll(/#[^\r\n]*|"(?:\\[\s\S]|[^"\\])*"|'[^']*'|,/g)];
   const removed = new Set<number>();
   for (let i = 0; i < tokens.length; i++) {
@@ -39,7 +39,13 @@ function prependId(array: string, id: string): string {
     if (comma) removed.add(comma.index);
   }
   const retained = array.split('').map((char, index) => removed.has(index) ? '' : char).join('');
-  return `[${JSON.stringify(id)}, ${retained.slice(1)}`;
+  const remaining = [...retained.matchAll(/#[^\r\n]*|"(?:\\[\s\S]|[^"\\])*"|'[^']*'|,/g)]
+    .filter(token => !token[0].startsWith('#'));
+  const last = remaining.at(-1);
+  const at = last ? last.index + last[0].length : 1;
+  const addition = last?.[0] === ',' ? ` ${JSON.stringify(id)},`
+    : last ? `, ${JSON.stringify(id)}` : JSON.stringify(id);
+  return retained.slice(0, at) + addition + retained.slice(at);
 }
 
 /** Returns a minimal text edit or refuses an unfamiliar/invalid TOML layout. */
@@ -51,7 +57,7 @@ export function codexStatusLineConfigText(source: string): string {
   if (original !== undefined && !isStrings(original)) throw new Error('Invalid status line');
   const items = original ?? DEFAULT_ITEMS;
   const id = items.find(isId) ?? 'session-id';
-  const nextItems = [id, ...items.filter(item => !isId(item))];
+  const nextItems = [...items.filter(item => !isId(item)), id];
   if (isDeepStrictEqual(original, nextItems)) return source;
   const expected = decode(source);
   if (isRecord(expected.tui)) expected.tui.status_line = nextItems;
@@ -68,7 +74,7 @@ export function codexStatusLineConfigText(source: string): string {
         const array = source.slice(start, end + 1);
         try {
           if (!isDeepStrictEqual(decode(`item = ${array}`).item, original)) continue;
-          const candidate = source.slice(0, start) + prependId(array, id) + source.slice(end + 1);
+          const candidate = source.slice(0, start) + appendId(array, id) + source.slice(end + 1);
           if (accept(candidate)) return candidate;
         } catch { /* Not the end of the array, or an unsupported string spelling. */ }
       }
@@ -119,7 +125,10 @@ export function codexConfigPathForPid(pid: number): string | undefined {
   return undefined;
 }
 
-export function ensureCodexStatusLineConfig(configPath: string): CodexStatusLineSetup {
+export function ensureCodexStatusLineConfig(
+  configPath: string,
+  { copyFile = copyFileSync }: { copyFile?: typeof copyFileSync } = {},
+): CodexStatusLineSetup {
   try {
     // Resolve dotfile symlinks before locking, backing up, or replacing content.
     if (existsSync(configPath) || lstatExists(configPath)) configPath = realpathSync(configPath);
@@ -133,7 +142,7 @@ export function ensureCodexStatusLineConfig(configPath: string): CodexStatusLine
       const mode = existed ? statSync(configPath).mode & 0o777 : 0o600;
       if (existed) {
         const backup = `${configPath}.botmux-statusline.bak`;
-        try { copyFileSync(configPath, backup, constants.COPYFILE_EXCL); }
+        try { copyFile(configPath, backup, constants.COPYFILE_EXCL); }
         catch (error) { if (!isRecord(error) || error.code !== 'EEXIST') throw error; }
       }
       // Protect edits made outside BotMux while preparing the patch.
