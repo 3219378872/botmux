@@ -18,7 +18,7 @@ import { clearBotmuxPromptEnv } from './skills/zero-injection.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { accessSync, chmodSync, mkdirSync, writeFileSync, unlinkSync, rmdirSync, existsSync, statSync, lstatSync, readdirSync, readlinkSync, readFileSync, realpathSync, copyFileSync, watch as fsWatch, createWriteStream, openSync, closeSync, fstatSync, constants as fsConstants, type FSWatcher, type WriteStream } from 'node:fs';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
-import { join, basename, dirname, delimiter, relative } from 'node:path';
+import { join, basename, dirname, delimiter, relative, extname } from 'node:path';
 import { resolveBotmuxWrapperBinDir, prependBotmuxBin } from './core/botmux-wrapper.js';
 import { sessionIdentityBinDir, prepareTriggerUserCliEnv, publishActiveTurn, GIT_ASKPASS_BASENAME } from './core/cli-identity.js';
 import { tokenStoreProtection } from './services/trigger-user-auth.js';
@@ -253,6 +253,7 @@ import { startCursorCot, stopAllCursorCot, type CursorCotEntry } from './service
 import { startAntigravityCot, stopAntigravityCot, stopAllAntigravityCot, type AntigravityCotEntry } from './services/antigravity-cot.js';
 import { findAntigravityConversationId, findAntigravityConversationIdByPid } from './services/antigravity-discovery.js';
 import { drainAntigravityTranscript, type AntigravityTranscriptState } from './services/antigravity-transcript.js';
+import { decideAntigravityTickerAction } from './services/antigravity-bridge-decision.js';
 import { shouldObserveCursorChatId, shouldPersistObservedCursorChatId } from './services/cursor-resume-policy.js';
 import { extractKiroSessionIdFromOutput } from './services/kiro-session.js';
 import { baselineJsonlCursor } from './services/jsonl-cursor.js';
@@ -1691,7 +1692,7 @@ function refreshCliPluginGeneration(
 ): void {
   if (cfg.promptInjection === 'none' && (!supportsZeroPromptInjection(cfg.cliId, cfg)
     || process.env[GOAL_ENV.V3_MARKER] === '1')) {
-    throw new Error('零注入需要本地 CLI 支持自动获取最终回复；暂不支持远端后端、v3 workflow，Cursor/Antigravity 不支持沙箱');
+    throw new Error('零注入需要本地 CLI 支持自动获取最终回复；暂不支持远端后端、v3 workflow，Cursor/Antigravity 暂不支持 scratch 全根 COW 沙箱（oncall 沙箱可用）');
   }
   const bot = resolvePluginGenerationBot(cfg);
 
@@ -7025,48 +7026,39 @@ function codexBridgeStartTimer(): void {
         // retired conversation's path is still bound. Gating only on
         // !codexBridgeRolloutPath would leave the new file unattached forever.
         if (!codexBridgeRolloutPath || codexBridgePendingSessionId) {
-          const pendingSid = codexBridgePendingSessionId;
-          // Resolution provenance matters: only the SID lookup can prove the
-          // pending id == the bound file. The pid fallback may legitimately
-          // return the RETIRED conversation (its db fd is still open while the
-          // new brain file is being created), in which case the pending NEW id
-          // must survive this tick.
-          let path: string | undefined;
-          let resolvedFromPendingSid = false;
-          if (pendingSid) {
-            path = resolveFileBridgePath('antigravity', { sessionId: pendingSid });
-            resolvedFromPendingSid = path !== undefined;
-          }
-          if (!path) {
-            const pid = currentAntigravityObservedPid();
-            if (pid) path = resolveFileBridgePath('antigravity', { pid });
-          }
-          if (path && path !== codexBridgeRolloutPath) {
+          const action = decideAntigravityTickerAction({
+            boundPath: codexBridgeRolloutPath,
+            pendingSid: codexBridgePendingSessionId,
+            resolveBySid: sid => resolveFileBridgePath('antigravity', { sessionId: sid }),
+            resolveByPid: () => {
+              const pid = currentAntigravityObservedPid();
+              return pid ? resolveFileBridgePath('antigravity', { pid }) : undefined;
+            },
+          });
+          if (action.kind === 'rotate') {
+            // A new conversation resolved while the retired one is bound
+            // (either the pending SID authoritatively, or the pid's open
+            // conversation switched): release the retired conversation's held
+            // final, then bind the new one fresh so its live turn is ingested
+            // from byte 0 (never as history).
             codexBridgePendingSessionId = undefined;
             codexAdoptPendingPid = undefined;
-            if (codexBridgeRolloutPath) {
-              // Rotation (/new) resolved via the ticker after a lazy-create
-              // wait: release the retired conversation's held final (a new
-              // conversation starting proves the old loop ended), then bind
-              // the new one fresh so its live turn is ingested from byte 0
-              // (never as history).
-              try {
-                codexBridgeIngest({ flushAntigravityTrailingFinal: true });
-                emitReadyCodexTurns();
-              } catch (err: any) {
-                log(`Antigravity late-rotation bridge drain failed: ${err.message}`);
-              }
-              codexBridgeDetachFile();
-              codexBridgeAttach(path, 'fresh-empty');
-            } else {
-              codexBridgeAttach(path, antigravityLateAttachMode(path));
+            try {
+              codexBridgeIngest({ flushAntigravityTrailingFinal: true });
+              emitReadyCodexTurns();
+            } catch (err: any) {
+              log(`Antigravity late-rotation bridge drain failed: ${err.message}`);
             }
-          } else if (path === codexBridgeRolloutPath && resolvedFromPendingSid) {
-            // The pending conversation turned out to be the one already bound
-            // (id reported before its file existed). Clear the pending marker
-            // so subsequent ticks don't re-resolve it every second. A PID-hit
-            // on the same path is NOT proof for the pending id and leaves it
-            // intact for the next tick.
+            codexBridgeDetachFile();
+            codexBridgeAttach(action.path, 'fresh-empty');
+          } else if (action.kind === 'bind-initial') {
+            codexBridgePendingSessionId = undefined;
+            codexAdoptPendingPid = undefined;
+            codexBridgeAttach(action.path, antigravityLateAttachMode(action.path));
+          } else if (action.kind === 'clear-pending') {
+            // Provenance: only a direct SID hit reaches here. A pid hit on the
+            // bound path returns 'idle' and leaves a pending NEW id intact
+            // (the retired conversation's fd can still be the one open).
             codexBridgePendingSessionId = undefined;
           }
         }
@@ -8077,7 +8069,10 @@ function maybeFlushOmpTrailingFinalOnQuietTick(): void {
 function maybeFlushAntigravityTrailingFinalOnQuietTick(): void {
   if (!structuredBridgeIsAntigravity()) return;
   const candidate = antigravityBridgeState.provisionalFinal;
-  if (!candidate) {
+  if (!candidate || antigravityBridgeState.hasPendingTask) {
+    // No candidate, or the transcript itself proves a background task is still
+    // outstanding (the TUI shows the ready composer during that wait — do not
+    // arm the quiet latch on screen evidence the transcript contradicts).
     antigravityQuietCandidateKey = undefined;
     antigravityQuietCandidateCompleteOffset = undefined;
     return;
@@ -16690,6 +16685,18 @@ async function spawnCli(
     // 目录（记录是 tmp+rename 原子写，外加同目录的 .lock），先建好给 bwrap 当 bind 源。
     try { mkdirSync(turnSendLedgerSessionDir(dataDir, cfg.sessionId), { recursive: true, mode: 0o700 }); } catch { /* */ }
     try { mkdirSync(join(dataDir, 'attachments', cfg.larkAppId), { recursive: true }); } catch { /* */ }
+    // Adapter-declared whole-DIRECTORY state roots that the fs-policy bind-
+    // mounts readWrite (cursor ~/.cursor, antigravity ~/.gemini). bwrap cannot
+    // bind a missing source, and these legitimately do not exist on a fresh
+    // host, so create them here at SPAWN (never at adapter-module load — the
+    // capabilities contract forbids creating runtime state on import). File-
+    // shaped authPaths (oauth token files, identified by an extension) are
+    // skipped: mkdir on them would create a directory in the token's place.
+    for (const authPath of cliAdapter.authPaths ?? []) {
+      const expanded = expandTildeLexical(authPath);
+      if (extname(expanded) !== '') continue;
+      try { mkdirSync(canonical(expanded), { recursive: true }); } catch { /* best effort */ }
+    }
     // (Schedules moved into each bot's BOT_HOME — the whole dir is already
     // bound readWrite for the owner, so no per-file pre-create is needed.)
 

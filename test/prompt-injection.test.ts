@@ -9,7 +9,7 @@ vi.mock('../src/bot-registry.js', () => ({
   getBot: vi.fn(() => { throw new Error('not configured'); }),
 }));
 
-import { supportsZeroPromptInjection, sessionPromptInjection } from '../src/core/prompt-injection.js';
+import { supportsZeroPromptInjection, sessionPromptInjection, isSandboxRequested } from '../src/core/prompt-injection.js';
 
 describe('supportsZeroPromptInjection', () => {
   it('supports the classic transcript CLIs', () => {
@@ -37,17 +37,24 @@ describe('supportsZeroPromptInjection', () => {
     expect(supportsZeroPromptInjection('codex', { backendType: 'riff' })).toBe(false);
   });
 
-  it('rejects cursor/antigravity under the bwrap sandbox (host cannot read their masked transcript dirs)', () => {
-    expect(supportsZeroPromptInjection('cursor', { sandbox: true })).toBe(false);
-    expect(supportsZeroPromptInjection('antigravity', { sandbox: true, backendType: 'tmux' })).toBe(false);
-    // Without the sandbox flag the same CLIs remain supported.
-    expect(supportsZeroPromptInjection('cursor', { sandbox: false })).toBe(true);
-    expect(supportsZeroPromptInjection('antigravity', { sandbox: undefined })).toBe(true);
+  it('allows cursor/antigravity under the oncall bwrap sandbox (transcript dirs are directory-bound to the host fs)', () => {
+    // ~/.cursor / ~/.gemini are adapter authPaths → real --bind in the oncall
+    // bwrap, so the daemon reads the same transcript paths the CLI writes.
+    expect(supportsZeroPromptInjection('cursor', { sandbox: true })).toBe(true);
+    expect(supportsZeroPromptInjection('cursor', { sandbox: 'oncall' })).toBe(true);
+    expect(supportsZeroPromptInjection('antigravity', { sandbox: true, backendType: 'tmux' })).toBe(true);
+    expect(supportsZeroPromptInjection('cursor', { readIsolation: true })).toBe(true);
+    expect(supportsZeroPromptInjection('antigravity', { sandbox: false, readIsolation: true })).toBe(true);
   });
 
-  it('still allows sandboxed CLIs whose transcript root is redirected/bound (codex keeps working)', () => {
-    expect(supportsZeroPromptInjection('codex', { sandbox: true, backendType: 'pty' })).toBe(true);
-    expect(supportsZeroPromptInjection('claude-code', { sandbox: true })).toBe(true);
+  it('rejects cursor/antigravity under the full-root scratch COW sandbox (structured bridge cannot resolve the merged tree yet)', () => {
+    expect(supportsZeroPromptInjection('cursor', { sandbox: 'scratch' })).toBe(false);
+    expect(supportsZeroPromptInjection('antigravity', { sandbox: 'scratch', backendType: 'pty' })).toBe(false);
+    // Explicit off is fine.
+    expect(supportsZeroPromptInjection('antigravity', { sandbox: 'off' })).toBe(true);
+    // The classic structured CLIs keep their existing scratch behaviour
+    // (their host-view gap predates this PR and is not widened here).
+    expect(supportsZeroPromptInjection('codex', { sandbox: 'scratch' })).toBe(true);
   });
 });
 
@@ -56,5 +63,32 @@ describe('sessionPromptInjection', () => {
     expect(sessionPromptInjection({ session: { promptInjection: 'none' }, initConfig: { promptInjection: 'default' } } as any)).toBe('none');
     expect(sessionPromptInjection({ session: {}, initConfig: { promptInjection: 'none' } } as any)).toBe('none');
     expect(sessionPromptInjection({ session: {}, initConfig: {} } as any)).toBe('default');
+  });
+});
+
+describe('isSandboxRequested', () => {
+  const prev = process.env.BOTMUX_SANDBOX;
+  const reset = () => {
+    if (prev === undefined) delete process.env.BOTMUX_SANDBOX;
+    else process.env.BOTMUX_SANDBOX = prev;
+  };
+  it('covers all enablement paths (incl. tri-state scratch/oncall) and defaults to false', () => {
+    delete process.env.BOTMUX_SANDBOX;
+    expect(isSandboxRequested()).toBe(false);
+    expect(isSandboxRequested({ sandbox: true })).toBe(true);
+    expect(isSandboxRequested({ sandbox: 'oncall' })).toBe(true);
+    expect(isSandboxRequested({ sandbox: 'scratch' })).toBe(true);
+    expect(isSandboxRequested({ sandbox: 'off' })).toBe(false);
+    expect(isSandboxRequested({ sandbox: false })).toBe(false);
+    expect(isSandboxRequested({ readIsolation: true })).toBe(true);
+    expect(isSandboxRequested({})).toBe(false);
+    process.env.BOTMUX_SANDBOX = '1';
+    expect(isSandboxRequested()).toBe(true);
+    // An explicit value takes precedence over the env switch; only an
+    // unspecified field falls through to it.
+    expect(isSandboxRequested({ sandbox: false, readIsolation: false })).toBe(false);
+    expect(isSandboxRequested({ sandbox: 'off' })).toBe(false);
+    expect(isSandboxRequested({})).toBe(true);
+    reset();
   });
 });

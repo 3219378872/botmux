@@ -433,7 +433,6 @@ export function resolveSessionTranscriptPath(q: TranscriptPathQuery): ResolvedTr
       return path ? { path, kind: 'pi' } : null;
     }
     case 'antigravity': {
-    case 'antigravity': {
       // The conversation id is interpolated into the brain path; the helper
       // validates the charset (traversal / separators). Read it through the
       // per-session scratch overlay like every other host-derived root, and
@@ -441,7 +440,6 @@ export function resolveSessionTranscriptPath(q: TranscriptPathQuery): ResolvedTr
       const pReal = antigravityTranscriptPath(q.cliSessionId);
       const p = pReal ? v(pReal) : null;
       return p && existsSync(p) ? { path: p, kind: 'antigravity' } : null;
-    }
     }
     default:
       return null;

@@ -27,6 +27,26 @@
  *     viewport that is both not-busy and shows the ready marker) and calls
  *     drain with flushTrailingFinal:true.
  *
+ * Pending-task self-attestation — why the screen gate alone is not enough:
+ * While a task runs in the BACKGROUND the TUI itself goes back to the ready
+ * composer, so a 1s quiet tick could coincide with a screen that looks idle
+ * even though the task has not reported back yet (the wake-up SYSTEM_MESSAGE
+ * arrives tens of seconds later — p50 ~20s, p90 ~81s in real logs). The
+ * transcript records that wait deterministically:
+ *   - a GENERIC record with status:"RUNNING" (every RUNNING GENERIC in
+ *     observed logs is one) whose content says "Tool is running as a
+ *     background task"
+ * sets hasPendingTask. Tool NAMES are deliberately NOT used: `manage_task` /
+ * `schedule` are ALSO called synchronously to poll task status (their GENERIC
+ * result is DONE, not RUNNING), so the name alone would latch waits that
+ * already ended and hold the real final forever. While the flag is set,
+ * flushTrailingFinal is refused no matter how quiet the screen is. The flag
+ * clears when the wait is actually over — the completion SYSTEM_MESSAGE, OR a
+ * FOREGROUND tool call after a GENERIC DONE: when a background task finishes
+ * without a SYSTEM_MESSAGE (observed in real logs) the planner's next step is
+ * an ordinary tool call, equivalent proof the wait ended. It also clears on
+ * the next USER_INPUT.
+ *
  * Continuation records cancel a held candidate: a PLANNER_RESPONSE carrying a
  * non-empty tool_calls array, a GENERIC tool-output line, or a
  * SYSTEM_MESSAGE / ERROR_MESSAGE. CHECKPOINT / TASK_NOTIFICATION neither
@@ -92,6 +112,23 @@ export function unwrapAntigravityUserInput(content: string): string {
  *  user turn confirms it (it gets emitted). */
 export interface AntigravityTranscriptState {
   provisionalFinal?: CodexBridgeEvent;
+  /** A background task (manage_task / schedule / RUNNING background GENERIC)
+   *  is outstanding: the transcript itself proves the turn is not done, so the
+   *  quiet-tick flush is refused until the completion SYSTEM_MESSAGE or the
+   *  next user turn clears it. */
+  hasPendingTask?: boolean;
+}
+
+/** Every GENERIC record in observed logs with this phrase has status RUNNING;
+ *  the phrase is the deterministic "the TUI is back at ready but the turn is
+ *  still alive" marker. Status RUNNING alone is accepted too (it never occurs
+ *  for foreground tool results in observed logs). */
+const BACKGROUND_TASK_PHRASE_RE = /running as a background task/i;
+
+function isBackgroundTaskRunningRecord(obj: any): boolean {
+  if (obj?.type !== 'GENERIC') return false;
+  return obj?.status === 'RUNNING'
+    || (typeof obj?.content === 'string' && BACKGROUND_TASK_PHRASE_RE.test(obj.content));
 }
 
 export interface AntigravityDrainResult {
@@ -119,11 +156,15 @@ function recordTimestampMs(rec: any): number {
 
 function cloneState(state: AntigravityTranscriptState | undefined): AntigravityTranscriptState {
   const candidate = state?.provisionalFinal;
-  return candidate ? { provisionalFinal: { ...candidate } } : {};
+  return {
+    ...(candidate ? { provisionalFinal: { ...candidate } } : {}),
+    ...(state?.hasPendingTask ? { hasPendingTask: true } : {}),
+  };
 }
 
 /** Fold one parsed record into the drain: push confirmed events, hold/cancel
- *  the provisional terminal. Returns the updated state. */
+ *  the provisional terminal, track outstanding background tasks. Returns the
+ *  updated state. */
 function foldRecord(
   path: string,
   lineStart: number,
@@ -133,52 +174,74 @@ function foldRecord(
   state: AntigravityTranscriptState,
 ): AntigravityTranscriptState {
   const type = obj?.type;
+  const keepPending = (s: AntigravityTranscriptState): AntigravityTranscriptState =>
+    s.hasPendingTask ? { hasPendingTask: true } : {};
 
   if (type === 'USER_INPUT') {
     // Only agy's own explicit submits start bridge turns. Any other source is
     // ignored entirely (and neither confirms nor cancels a candidate).
     if (obj.source !== undefined && obj.source !== 'USER_EXPLICIT') return state;
-    // A new explicit user turn proves the previous loop really ended: release
-    // its held final BEFORE the user event so turns stay interleaved.
-    if (state.provisionalFinal) {
-      events.push(state.provisionalFinal);
-      state = {};
-    }
+    // A new explicit user turn proves the previous loop really ended AND no
+    // background task from it is outstanding: release its held final BEFORE
+    // the user event so turns stay interleaved, and reset the turn state.
+    if (state.provisionalFinal) events.push(state.provisionalFinal);
     const raw = typeof obj.content === 'string' ? obj.content : '';
     const text = unwrapAntigravityUserInput(raw);
     if (text) {
       events.push({ uuid: `${path}:${lineStart}`, timestampMs, kind: 'user', text });
     }
-    return state;
+    return {};
   }
 
   if (type === 'PLANNER_RESPONSE') {
-    // A NON-EMPTY tool_calls array is unambiguous continuation — the planner
-    // is still acting. Defensive: an empty array / null / missing field does
-    // NOT cancel (a build emitting [] on the terminal step must not lose the
-    // final); such a content-only record becomes the candidate.
     if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) {
+      // The planner is acting (foreground or synchronously polling a
+      // background task's status): the background WAIT is over as far as the
+      // transcript proves, so drop any held candidate and clear the pending
+      // flag. The definitive "task launched in the background" signal is the
+      // following GENERIC RUNNING record, which re-latches — tool names alone
+      // are not reliable (manage_task is also called synchronously).
       return {};
     }
     const text = typeof obj.content === 'string' ? obj.content : '';
     if (!text.trim()) {
       // Empty content-only step: the "model output must contain either output
-      // text or tool calls" ERROR precursor. Never a final.
-      return {};
+      // text or tool calls" ERROR precursor. Never a final; do not disturb a
+      // held candidate or the pending flag.
+      return state;
     }
     // Content-only step: newest candidate wins (a later content-only step
-    // replaces an earlier held one).
-    return { provisionalFinal: { uuid: `${path}:${lineStart}`, timestampMs, kind: 'assistant_final', text } };
+    // replaces an earlier held one). The pending-task flag rides along — the
+    // quiet flush checks it and refuses while a task is outstanding.
+    return {
+      provisionalFinal: { uuid: `${path}:${lineStart}`, timestampMs, kind: 'assistant_final', text },
+      ...(state.hasPendingTask ? { hasPendingTask: true } : {}),
+    };
   }
 
-  // Tool output reaching the transcript after a content-only step means the
-  // loop is still running (background-task shape), as does any system message
-  // (stop-hook / task-completion wake-up) or error record.
-  if (type === 'GENERIC' || type === 'SYSTEM_MESSAGE' || type === 'ERROR_MESSAGE' || type === 'ERROR') {
+  // A background task that just went RUNNING proves the turn is waiting: latch
+  // the flag. A later GENERIC DONE is only the tool result landing — the
+  // outstanding-task state must survive it; the completion SYSTEM_MESSAGE is
+  // the actual wake-up that clears it.
+  if (isBackgroundTaskRunningRecord(obj)) {
+    return { ...state, hasPendingTask: true };
+  }
+  if (type === 'GENERIC') {
+    // Foreground tool output after a content-only step cancels the candidate;
+    // a possibly-outstanding background task stays recorded.
+    return keepPending(state);
+  }
+
+  // SYSTEM_MESSAGE is the background-task result / stop-hook wake-up: the
+  // wait is over, so clear hasPendingTask, AND cancel any provisional
+  // narration — the planner either continues with tools (re-cancelling) or
+  // emits the real final afterwards. ERROR records cancel the candidate too.
+  if (type === 'SYSTEM_MESSAGE' || type === 'ERROR_MESSAGE' || type === 'ERROR') {
     return {};
   }
 
-  // CHECKPOINT / TASK_NOTIFICATION / unknown types neither confirm nor cancel.
+  // CHECKPOINT / TASK_NOTIFICATION / unknown types neither confirm nor cancel;
+  // in particular they do NOT clear hasPendingTask.
   return state;
 }
 
@@ -204,9 +267,12 @@ export function drainAntigravityTranscript(
   if (size < fromOffset) return { events: [], newOffset: fromOffset, pendingTail: '', state: cloneState(incomingState) };
   if (size === fromOffset) {
     // Nothing new on disk, but the caller may be releasing a held candidate.
-    if (options.flushTrailingFinal && incomingState.provisionalFinal) {
+    // Refuse while a background task is still outstanding: its completion
+    // SYSTEM_MESSAGE (which clears the flag) has not arrived, so a quiet
+    // screen cannot prove the turn is done.
+    if (options.flushTrailingFinal && incomingState.provisionalFinal && !incomingState.hasPendingTask) {
       const events = [incomingState.provisionalFinal];
-      return { events, newOffset: fromOffset, pendingTail: '', state: {} };
+      return { events, newOffset: fromOffset, pendingTail: '', state: { ...(incomingState.hasPendingTask ? { hasPendingTask: true } : {}) } };
     }
     return { events: [], newOffset: fromOffset, pendingTail: '', state: cloneState(incomingState) };
   }
@@ -250,7 +316,10 @@ export function drainAntigravityTranscript(
     }
   }
 
-  if (options.flushTrailingFinal && state.provisionalFinal) {
+  // Release the candidate only when the flush is requested AND no background
+  // task is outstanding. With hasPendingTask set the candidate rides another
+  // tick until the completion SYSTEM_MESSAGE / next user turn clears it.
+  if (options.flushTrailingFinal && state.provisionalFinal && !state.hasPendingTask) {
     events.push(state.provisionalFinal);
     state.provisionalFinal = undefined;
   }

@@ -45,6 +45,19 @@ function toolCall(name: string) {
   return { id: `call-${name}`, name, args: {} };
 }
 
+const BG_RUNNING_RECORD = {
+  step_index: 100, source: 'MODEL', type: 'GENERIC', status: 'RUNNING',
+  content: 'Created At: 2026-09-29T03:00:10-07:00\nTool is running as a background task with task id t-1',
+};
+const BG_DONE_RECORD = {
+  step_index: 101, source: 'MODEL', type: 'GENERIC', status: 'DONE',
+  content: 'Created At: 2026-09-29T03:00:10-07:00\nCompleted At: 2026-09-29T03:01:30-07:00\n$ bun run build\n',
+};
+const BG_SYSTEM_RECORD = {
+  step_index: 102, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE',
+  content: 'The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n<SYSTEM_MESSAGE>\n[Message] task t-1 finished with result: exited with code 0\n</SYSTEM_MESSAGE>',
+};
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'antigravity-transcript-'));
   path = join(dir, 'transcript.jsonl');
@@ -140,7 +153,7 @@ describe('drainAntigravityTranscript', () => {
     expect(r.state.provisionalFinal?.text).toBe('答案二');
   });
 
-  it('cancels a provisional final when the planner wakes and runs more tools (background-task shape)', () => {
+  it('cancels a held candidate when the planner wakes and runs more tools (background-task shape)', () => {
     writeFileSync(path, [
       line(userRecord('跑下构建')),
       line(plannerStep({ content: 'Wait for task `build-1` to finish.', toolCalls: [toolCall('shell')], step: 1 })),
@@ -192,6 +205,109 @@ describe('drainAntigravityTranscript', () => {
     expect(r.state.provisionalFinal?.text).toBe('答案');
     expect(r.pendingTail).toContain('还在写');
     expect(r.newOffset).toBe(require('node:fs').statSync(path).size - Buffer.byteLength(r.pendingTail, 'utf8'));
+  });
+
+  it('holds a pending background task: the quiet flush is refused until the completion SYSTEM_MESSAGE', () => {
+    writeFileSync(path, [
+      line(userRecord('跑下构建')),
+      line(plannerStep({ content: 'Wait for task `b-1` to finish.', toolCalls: [toolCall('manage_task')], step: 1 })),
+      line(BG_RUNNING_RECORD),
+      // The TUI is back at the ready composer while the task runs.
+      line(plannerStep({ content: 'Wait for task `b-1` to finish.', step: 2, createdAt: '2026-09-29T03:00:11Z' })),
+    ].join(''));
+
+    let r = drainAntigravityTranscript(path, 0);
+    expect(r.events.map(e => e.kind)).toEqual(['user']);
+    expect(r.state.provisionalFinal?.text).toBe('Wait for task `b-1` to finish.');
+    expect(r.state.hasPendingTask).toBe(true);
+
+    // Screen quiet + unchanged offset is NOT enough: the flush must be refused
+    // while the transcript proves a task is outstanding.
+    r = drainAntigravityTranscript(path, r.newOffset, r.state, { flushTrailingFinal: true });
+    expect(r.events).toHaveLength(0);
+    expect(r.state.provisionalFinal?.text).toBe('Wait for task `b-1` to finish.');
+    expect(r.state.hasPendingTask).toBe(true);
+
+    // The tool result lands (DONE) — the task is still outstanding until the
+    // SYSTEM_MESSAGE wake-up.
+    appendFileSync(path, line(BG_DONE_RECORD));
+    r = drainAntigravityTranscript(path, r.newOffset, r.state);
+    expect(r.events).toHaveLength(0);
+    expect(r.state.hasPendingTask).toBe(true);
+    expect(r.state.provisionalFinal).toBeUndefined();
+
+    // Wake-up clears the wait; the planner continues with tools, then gives
+    // the real final.
+    appendFileSync(path, [
+      line(BG_SYSTEM_RECORD),
+      line(plannerStep({ content: '构建绿了，检查产物。', toolCalls: [toolCall('read')], step: 103, createdAt: '2026-09-29T03:01:31Z' })),
+      line(plannerStep({ content: '构建通过，产物已就绪。', step: 104, createdAt: '2026-09-29T03:01:40Z' })),
+    ].join(''));
+    r = drainAntigravityTranscript(path, r.newOffset, r.state);
+    expect(r.events).toHaveLength(0);
+    expect(r.state.hasPendingTask).toBeUndefined();
+    expect(r.state.provisionalFinal?.text).toBe('构建通过，产物已就绪。');
+
+    // NOW the quiet flush releases the real answer.
+    r = drainAntigravityTranscript(path, r.newOffset, r.state, { flushTrailingFinal: true });
+    expect(r.events.map(e => `${e.kind}:${e.text}`)).toEqual(['assistant_final:构建通过，产物已就绪。']);
+  });
+
+  it('latches a pending task from a RUNNING background GENERIC even without the manage_task tool name', () => {
+    writeFileSync(path, [
+      line(userRecord('q')),
+      line(plannerStep({ content: '稍等后台任务', step: 1 })),
+      line(BG_RUNNING_RECORD),
+    ].join(''));
+    const r = drainAntigravityTranscript(path, 0);
+    expect(r.state.provisionalFinal?.text).toBe('稍等后台任务');
+    expect(r.state.hasPendingTask).toBe(true);
+    const flushed = drainAntigravityTranscript(path, r.newOffset, r.state, { flushTrailingFinal: true });
+    expect(flushed.events).toHaveLength(0);
+  });
+
+  it('clears a pending task when the planner resumes with a FOREGROUND tool call without any SYSTEM_MESSAGE', () => {
+    // Observed in real logs: agy sometimes finishes a background task with
+    // only a GENERIC DONE (no SYSTEM_MESSAGE) and immediately continues with
+    // an ordinary tool call. Without this clear the real final would be held
+    // forever behind hasPendingTask.
+    writeFileSync(path, [
+      line(userRecord('跑下发布评估')),
+      line(plannerStep({ content: 'No tools called; waiting for task notification.', toolCalls: [toolCall('manage_task')], step: 1 })),
+      line(BG_DONE_RECORD),
+      line(plannerStep({ content: '结果回来了，整理结论。', toolCalls: [toolCall('shell')], step: 103, createdAt: '2026-09-29T03:01:31Z' })),
+      line({ step_index: 104, source: 'MODEL', type: 'GENERIC', status: 'DONE', content: 'git log output' }),
+      line(plannerStep({ content: '评估完成，今日无待发版提交。', step: 105, createdAt: '2026-09-29T03:01:40Z' })),
+    ].join(''));
+    let r = drainAntigravityTranscript(path, 0);
+    expect(r.events.map(e => e.kind)).toEqual(['user']);
+    expect(r.state.hasPendingTask).toBeUndefined();
+    expect(r.state.provisionalFinal?.text).toBe('评估完成，今日无待发版提交。');
+    r = drainAntigravityTranscript(path, r.newOffset, r.state, { flushTrailingFinal: true });
+    expect(r.events.map(e => e.kind)).toEqual(['assistant_final']);
+  });
+
+  it('a SYSTEM_MESSAGE alone cancels a candidate and clears the pending flag (no following tools)', () => {
+    writeFileSync(path, [
+      line(userRecord('q')),
+      line(plannerStep({ content: '看似收尾', step: 1 })),
+      line(BG_SYSTEM_RECORD),
+    ].join(''));
+    const r = drainAntigravityTranscript(path, 0);
+    expect(r.events.map(e => e.kind)).toEqual(['user']);
+    expect(r.state.provisionalFinal).toBeUndefined();
+    expect(r.state.hasPendingTask).toBeUndefined();
+  });
+
+  it('newest content-only step wins and replaces the earlier held candidate', () => {
+    writeFileSync(path, [
+      line(userRecord('q')),
+      line(plannerStep({ content: '第一版结论', step: 1 })),
+      line(plannerStep({ content: '修正后的结论', step: 2, createdAt: '2026-09-29T03:00:30Z' })),
+    ].join(''));
+    const r = drainAntigravityTranscript(path, 0);
+    expect(r.events.map(e => e.kind)).toEqual(['user']);
+    expect(r.state.provisionalFinal?.text).toBe('修正后的结论');
   });
 
   it('treats an empty tool_calls array with content as a candidate terminal', () => {
