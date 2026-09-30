@@ -41,6 +41,7 @@ import { effectiveReplyDelivery } from './reply-delivery.js';
 import { fallbackTurnId, frozenReplyContextForTurn, isSubstituteTurn, pickTurnReplyTarget, rehomeReplyTargetState, replyTargetKey } from './reply-target.js';
 import { updateMessage, deleteMessage, pinMessage, unpinMessage, listChatPins, sendEphemeralCard, sendUserMessage, addReaction, removeReaction, getMessageChatId, resolveCurrentChatBotOpenIdsByLarkAppIds, MessageWithdrawnError, MessageUpdateExpiredError, type LarkPinRecord } from '../im/lark/client.js';
 import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTuiPromptCard, buildTuiPromptResolvedCard, buildTuiPromptFailedCard, buildRelayedFrozenCard, buildTurnFailedCard, getCliDisplayName, type IdleCardLabel } from '../im/lark/card-builder.js';
+import { buildClosedSessionCard } from './closed-session-card.js';
 import { codexServiceTierBadge } from '../services/codex-service-tier.js';
 import { isFableModelId, normalizeClaudeModelId } from '../services/claude-transcript.js';
 import { cliModelSupportsReasoningEffort, isBackendVariantCliId, isConfigurableReasoningCliId, reasoningEffortsForCliModel } from '../services/codex-reasoning-effort.js';
@@ -4564,6 +4565,8 @@ export function scheduleCardPatch(
   turnId?: string,
   opts?: { userInitiated?: boolean },
 ): boolean {
+  // A late screen/config callback must not repaint a closed session as working.
+  if (ds.session.status === 'closed') return false;
   // Defense-in-depth transport gate: a no-transport session (apiOnly bot or HTTP
   // virtual chat) has no real Feishu card to PATCH. Callers already suppress via
   // managedAuxUiSuppressed, but guarding the flush entry too means a stray direct
@@ -7462,7 +7465,14 @@ export interface CloseResidual {
  * consumer needs one.
  */
 export type CloseSessionResult =
-  | { ok: true; outcome: 'closed'; alreadyClosed: boolean; known: boolean }
+  | {
+      ok: true;
+      outcome: 'closed';
+      alreadyClosed: boolean;
+      known: boolean;
+      /** The closing card entered the serialized PATCH queue; delivery is best-effort. */
+      closedCardPatchQueued?: true;
+    }
   | {
       ok: true;
       outcome: 'closed_with_residual';
@@ -7514,7 +7524,7 @@ export async function closeSessionForBackgroundCleanup(
 
 export async function closeSession(
   sessionId: string,
-  opts?: { awaitWorkerExit?: boolean },
+  opts?: { awaitWorkerExit?: boolean; cardVisibility?: 'private' | 'public' },
 ): Promise<CloseSessionResult> {
   // `awaitWorkerExit` (default true): whether to block on the worker process
   // actually exiting before returning. A busy CLI wedges in node-pty teardown
@@ -7767,6 +7777,30 @@ export async function closeSession(
     );
   }
 
+  // Close can originate from IPC/background cleanup, not only a card button.
+  // Freeze the existing live card through the same serialized PATCH queue so
+  // an in-flight screen update cannot land after the closed state. Refused or
+  // residual closes must not claim the underlying execution was terminated.
+  // Shared-adopt closes only detach BotMux. Private close cards contain local
+  // paths and resume commands, so neither bot policy nor clicked-card privacy
+  // may be bypassed by this background PATCH path.
+  let closedCardPatchQueued = false;
+  if (ds && !prepared.residual && !isSharedAdoptSession(ds)
+      && opts?.cardVisibility !== 'private'
+      && ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL) {
+    try {
+      const botCfg = getBot(ds.larkAppId).config;
+      if (!botCfg.privateCard && !streamingCardDisabled(ds)
+          && larkTransportEnabled({ chatId: ds.chatId, apiOnly: botCfg.apiOnly })) {
+        ds.pendingCardId = ds.streamCardId;
+        ds.pendingCardJson = buildClosedSessionCard(ds, localeForBot(ds.larkAppId));
+        if (!ds.cardPatchInFlight) flushCardPatch(ds);
+        closedCardPatchQueued = true;
+      }
+    } catch (error) {
+      logger.warn(`[${sessionId.slice(0, 8)}] Could not freeze closed session card: ${error}`);
+    }
+  }
   const closedSnapshot = sessionStore.getOwnedSession(sessionId) ?? ds?.session ?? stored;
   const runClosedLifecycle = async (workerExitProven: boolean): Promise<void> => {
     if (!closedSnapshot || !callbacks?.onSessionClosed) return;
@@ -7913,7 +7947,10 @@ export async function closeSession(
       known,
     };
   }
-  return { ok: true, outcome: 'closed', alreadyClosed, known };
+  return {
+    ok: true, outcome: 'closed', alreadyClosed, known,
+    ...(closedCardPatchQueued ? { closedCardPatchQueued: true as const } : {}),
+  };
 }
 
 /**
