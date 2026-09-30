@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { deflateSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SESSION_GROUP_AVATAR_LOGO_BASE64 } from '../src/services/session-group-avatar-logo-data.js';
 
@@ -9,9 +10,10 @@ const APP = 'cli_testapp';
 const AVATAR_SIZE = 360;
 const LOGO_WIDTH = 221;
 const LOGO_HEIGHT = 187;
-const LOGO_BASE64_SHA256 = 'c60211c63472cdee3bbdffc622c5a4c008c181c648c44e9c7424b2538eec0d60';
-const LOGO_BYTES_SHA256 = '98d42da245255fe46565a7b6827fc468e634da92d8de3eeee36646cc37a781f2';
-const OPAQUE_SAMPLE = Object.freeze({ x: 27, y: 1 });
+const LOGO_BASE64_SHA256 = '24fc45b635a2ffe1bdc454bcc467c86862dfb8d0def91b4af47c884d7c1b8940';
+const LOGO_BYTES_SHA256 = 'da07572f73ba70a360fb397847f39b0833fc2c9a2830c090c6dccc9fe374d34a';
+const LOGO_RGBA_SHA256 = '2647768996e0a45b9213caedac807f52a10c3d6ae7d88b038417ca6bbfa4c0a3';
+const OPAQUE_SAMPLE = Object.freeze({ x: 45, y: 30 });
 const EDGE_SAMPLE = Object.freeze({ x: 174, y: 169 });
 const TRANSPARENT_SAMPLE = Object.freeze({ x: 0, y: 0 });
 
@@ -134,6 +136,37 @@ function blendExpected(
   ];
 }
 
+function pngFixtureChunk(type: string, payload: Uint8Array): Buffer {
+  const bytes = Buffer.concat([Buffer.from(type, 'ascii'), payload]);
+  let checksum = 0xffffffff;
+  for (const byte of bytes) {
+    checksum ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      checksum = (checksum >>> 1) ^ ((checksum & 1) ? 0xedb88320 : 0);
+    }
+  }
+
+  const result = Buffer.alloc(bytes.length + 8);
+  result.writeUInt32BE(payload.length, 0);
+  bytes.copy(result, 4);
+  result.writeUInt32BE((checksum ^ 0xffffffff) >>> 0, result.length - 4);
+  return result;
+}
+
+function rgbaPngFixture(width: number, height: number, compressed: Uint8Array): Buffer {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 6;
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngFixtureChunk('IHDR', header),
+    pngFixtureChunk('IDAT', compressed),
+    pngFixtureChunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
 describe('session-group-avatar', () => {
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'session-avatar-test-'));
@@ -177,6 +210,7 @@ describe('session-group-avatar', () => {
     expect(logo.width).toBe(LOGO_WIDTH);
     expect(logo.height).toBe(LOGO_HEIGHT);
     expect(logo.data).toHaveLength(LOGO_WIDTH * LOGO_HEIGHT * 4);
+    expect(createHash('sha256').update(logo.data).digest('hex')).toBe(LOGO_RGBA_SHA256);
 
     const encoded = mod.encodePngRgba(logo.width, logo.height, logo.data);
     const decoded = mod.decodePngRgba(encoded);
@@ -186,6 +220,64 @@ describe('session-group-avatar', () => {
     expect(Array.from(decoded.data)).toEqual(Array.from(logo.data));
     expect(createHash('sha256').update(SESSION_GROUP_AVATAR_LOGO_BASE64).digest('hex')).toBe(LOGO_BASE64_SHA256);
     expect(createHash('sha256').update(Buffer.from(SESSION_GROUP_AVATAR_LOGO_BASE64, 'base64')).digest('hex')).toBe(LOGO_BYTES_SHA256);
+  });
+
+  it('decodes a fixed RGBA fixture with PNG filters 0 through 4', async () => {
+    const mod = await import('../src/services/session-group-avatar.js');
+    const filteredScanlines = Buffer.from([
+      0, 10, 40, 90, 255, 200, 15, 230, 128, 5, 250, 60, 0,
+      1, 30, 20, 240, 128, 234, 180, 66, 127, 242, 156, 211, 65,
+      2, 220, 241, 36, 127, 52, 40, 150, 1, 86, 171, 225, 64,
+      3, 142, 79, 141, 94, 206, 127, 192, 61, 157, 208, 107, 198,
+      4, 179, 49, 29, 102, 104, 129, 139, 245, 17, 115, 102, 178,
+    ]);
+    const expectedRgba = new Uint8Array([
+      10, 40, 90, 255, 200, 15, 230, 128, 5, 250, 60, 0,
+      30, 20, 240, 128, 8, 200, 50, 255, 250, 100, 5, 64,
+      250, 5, 20, 255, 60, 240, 200, 0, 80, 15, 230, 128,
+      11, 81, 151, 221, 241, 31, 111, 171, 61, 231, 21, 91,
+      190, 130, 180, 67, 89, 210, 34, 56, 78, 90, 123, 234,
+    ]);
+
+    const png = rgbaPngFixture(3, 5, deflateSync(filteredScanlines));
+    expect(mod.decodePngRgba(png)).toEqual({ width: 3, height: 5, data: expectedRgba });
+  });
+
+  it('rejects oversized PNG dimensions before inflating IDAT', async () => {
+    const mod = await import('../src/services/session-group-avatar.js');
+
+    for (const [width, height] of [[6000, 6000], [4097, 4096], [4096, 4097], [1, 16777217]]) {
+      const png = rgbaPngFixture(width!, height!, Buffer.from('invalid compressed payload'));
+      expect(() => mod.decodePngRgba(png)).toThrow('PNG exceeds pixel limit (16777216)');
+    }
+
+    const atLimit = rgbaPngFixture(4096, 4096, deflateSync(Buffer.alloc(0)));
+    expect(() => mod.decodePngRgba(atLimit)).toThrow('unexpected PNG payload size (0 !== 67112960)');
+  });
+
+  it('bounds inflate output even when IHDR claims a smaller image', async () => {
+    const mod = await import('../src/services/session-group-avatar.js');
+    const png = rgbaPngFixture(1, 1, deflateSync(Buffer.alloc(6)));
+
+    expect(() => mod.decodePngRgba(png)).toThrow('Cannot create a Buffer larger than 5 bytes');
+  });
+
+  it('keeps straight-alpha logo edges free of a white matte', async () => {
+    const mod = await import('../src/services/session-group-avatar.js');
+    const { data } = mod.decodeInlineSessionGroupLogo();
+    let semiTransparentPixels = 0;
+    const channelTotals = [0, 0, 0];
+    for (let offset = 0; offset < data.length; offset += 4) {
+      const alpha = data[offset + 3]!;
+      if (alpha === 0 || alpha === 255) continue;
+      semiTransparentPixels += 1;
+      for (let channel = 0; channel < 3; channel += 1) {
+        channelTotals[channel] = channelTotals[channel]! + data[offset + channel]!;
+      }
+    }
+
+    expect(semiTransparentPixels).toBe(3143);
+    expect(channelTotals.map((total) => Math.round(total / semiTransparentPixels))).toEqual([143, 157, 245]);
   });
 
   it('renders logo pixels at the exact exported bounds and preserves background outside the logo', async () => {

@@ -18,6 +18,7 @@ import { logger } from '../utils/logger.js';
 import { SESSION_GROUP_AVATAR_LOGO_BASE64 } from './session-group-avatar-logo-data.js';
 
 const AVATAR_SIZE = 360;
+const MAX_PNG_PIXELS = 4096 * 4096;
 const LOGO_X = 69;
 const LOGO_Y = 86;
 const LOGO_WIDTH = 221;
@@ -301,14 +302,17 @@ export function decodePngRgba(png: Uint8Array): DecodedPng {
   }
 
   if (width <= 0 || height <= 0) throw new Error('PNG missing IHDR');
+  if (width * height > MAX_PNG_PIXELS) {
+    throw new Error(`PNG exceeds pixel limit (${MAX_PNG_PIXELS})`);
+  }
   if (bitDepth !== 8 || colorType !== 6 || interlace !== 0) {
     throw new Error(`unsupported PNG format (${bitDepth}/${colorType}/${interlace})`);
   }
 
   const bytesPerPixel = 4;
   const stride = width * bytesPerPixel;
-  const inflated = inflateSync(Buffer.concat(idat));
   const expected = height * (stride + 1);
+  const inflated = inflateSync(Buffer.concat(idat), { maxOutputLength: expected });
   if (inflated.length !== expected) {
     throw new Error(`unexpected PNG payload size (${inflated.length} !== ${expected})`);
   }
