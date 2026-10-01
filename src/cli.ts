@@ -6851,7 +6851,8 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
 定时任务（可在 CLI 会话内自动推断 chat）:
   schedule list                        列出所有任务
   schedule add <schedule> <prompt>     添加任务（ex: "30m" / "every 2h" / "每日9:00" / "0 9 * * *"）
-       --calendar <name>               按本 Bot 本地工作日历过滤自动 cron/interval；手动执行绕过
+       --calendar <name>               绑定内置或自定义工作日历；手动执行绕过
+       --calendar-day-type <type>      workday 仅工作日（默认）；restday 仅休息日
        --model <id>                    本任务用指定模型跑（如 gpt-5.6-sol），不改 bot 配置
        --reasoning-effort <level>      low|medium|high|xhigh|max|ultra（模型支持才生效）
                                        两者都只在本任务新建会话那次执行生效；配 --new-topic 则每次生效
@@ -7752,6 +7753,10 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
     // with a warning rather than skipping the run.
     const calendar = argValue(rest, '--calendar');
     if (rest.includes('--calendar') && !calendar) throw new Error('--calendar requires a name');
+    const calendarDayType = argValue(rest, '--calendar-day-type');
+    if (rest.includes('--calendar-day-type') && !calendarDayType) throw new Error('--calendar-day-type requires workday or restday');
+    const { normalizeCalendarDayType } = await import('./services/work-calendar.js');
+    const normalizedDayType = normalizeCalendarDayType(calendarDayType);
     const model = argValue(rest, '--model')?.trim();
     if (rest.includes('--model') && !model) {
       console.error('--model 需要一个模型 id，例如 --model gpt-5.6-sol。');
@@ -7854,6 +7859,7 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
         silent,
         followActive: wantsFollowActive ? true : undefined,
         calendar,
+        calendarDayType: normalizedDayType,
         model,
         reasoningEffort,
       });
@@ -7870,7 +7876,7 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
     const next = task.nextRunAt ? new Date(task.nextRunAt).toLocaleString('zh-CN', { timeZone: scheduleTimeZone() }) : '—';
     console.log(`✅ 已创建定时任务 [${task.id}] ${task.name}`);
     console.log(`   规则: ${parsed.display}`);
-    if (calendar) console.log(`   工作日历: ${calendar}（自动过滤，手动执行绕过）`);
+    if (calendar) console.log(`   自定义工作日历: ${calendar}（${normalizedDayType === 'restday' ? '仅休息日' : '仅工作日'}，手动执行绕过）`);
     console.log(`   下次执行: ${next}`);
     console.log(`   工作目录: ${workingDir}`);
     console.log(`   执行位置: ${executionPosition === 'new-topic' ? '每次新话题' : executionPosition === 'top-level' ? '群消息顶层' : '话题下'}`);

@@ -1394,6 +1394,7 @@ export interface ScheduledTask {
   id: string;
   /** Optional per-bot work-calendar name; filters automatic recurring dispatch only. */
   calendar?: string;
+  calendarDayType?: import('./services/work-calendar.js').CalendarDayType;
   lastCalendarCheck?: import('./services/work-calendar.js').CalendarCheck;
   /** Durable CLI run-now request; consumed atomically when claiming a run. */
   manualRunRequested?: boolean;

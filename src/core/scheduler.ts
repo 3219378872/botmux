@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import * as scheduleStore from '../services/schedule-store.js';
 import type { ScheduleReasoningEffort } from '../services/schedule-store.js';
 import { removeSchedulePrecondition } from '../services/schedule-precondition-store.js';
-import { checkTaskCalendar, manualCalendarCheck, normalizeCalendarBinding } from '../services/work-calendar.js';
+import { checkTaskCalendar, manualCalendarCheck, normalizeCalendarBinding, normalizeCalendarDayType } from '../services/work-calendar.js';
 import { appendScheduleRunLog, removeScheduleRunLogs } from '../services/schedule-run-log-store.js';
 import type { ScheduledTaskPreconditionOutcome } from '../services/schedule-precondition-gate.js';
 import { scheduleTimeZone, zonedTomorrowAt } from '../utils/timezone.js';
@@ -566,7 +566,7 @@ async function tick(): Promise<void> {
     const calendarCheck = executionContext.trigger === 'scheduler'
       ? checkTaskCalendar(claimedTask, claimedTask.larkAppId ?? ownerAppId ?? scheduleStore.getScheduleScope() ?? undefined)
       : manualCalendarCheck(claimedTask);
-    if (calendarCheck && calendarCheck.status !== 'working' && calendarCheck.status !== 'bypassed') {
+    if (calendarCheck && calendarCheck.status !== 'bypassed' && !calendarCheck.matches) {
       scheduleStore.markCalendarBlocked(claimedTask.id, calendarCheck, executionContext.runId);
       const status = calendarCheck.status === 'error' ? 'error' : 'skipped';
       logger.info(`[scheduler] Calendar ${calendarCheck.calendar}: ${calendarCheck.reason} (${calendarCheck.date ?? 'unknown date'}), task ${claimedTask.id} ${status}`);
@@ -726,6 +726,7 @@ export function addTask(params: {
   id?: string;
   preconditionRef?: string;
   calendar?: string;
+  calendarDayType?: import('../services/work-calendar.js').CalendarDayType;
   name: string;
   schedule: string;
   prompt: string;
@@ -769,6 +770,9 @@ export function addTask(params: {
   assertScheduleChatTargetLimit(targets.chatIds ?? [targets.chatId]);
   const parsed = params.parsed ?? parseSchedule(params.schedule);
   const calendar = normalizeCalendarBinding(params.calendar);
+  const dayType = normalizeCalendarDayType(params.calendarDayType);
+  if (!calendar && dayType === 'restday') throw new Error('calendar_required');
+  const calendarDayType = calendar && dayType === 'restday' ? dayType : undefined;
   if (calendar && parsed.kind === 'once') throw new Error('calendar_once_unsupported');
   const nextRunAt = computeNextRun(parsed) ?? undefined;
   const executionPosition: ScheduleExecutionPosition = params.executionPosition
@@ -802,6 +806,7 @@ export function addTask(params: {
     id: params.id,
     preconditionRef: params.preconditionRef,
     calendar,
+    calendarDayType,
     name: params.name,
     schedule: params.schedule,
     parsed,
@@ -1047,6 +1052,7 @@ export function updateTask(
   updates: {
     name?: string;
     calendar?: string | null;
+    calendarDayType?: import('../services/work-calendar.js').CalendarDayType | null;
     prompt?: string;
     schedule?: string;
     deliver?: 'origin' | 'new-topic';
@@ -1069,6 +1075,12 @@ export function updateTask(
   let calendar: string | undefined;
   try { calendar = updates.calendar === undefined ? task.calendar : normalizeCalendarBinding(updates.calendar); }
   catch { return { ok: false, error: 'invalid_calendar_name' }; }
+  let calendarDayType: import('../services/work-calendar.js').CalendarDayType | undefined;
+  try {
+    const dayType = normalizeCalendarDayType(updates.calendarDayType !== undefined ? updates.calendarDayType : updates.calendar !== undefined && !calendar ? undefined : task.calendarDayType);
+    if (!calendar && dayType === 'restday') return { ok: false, error: 'calendar_required' };
+    calendarDayType = calendar && dayType === 'restday' ? dayType : undefined;
+  } catch { return { ok: false, error: 'invalid_calendar_day_type' }; }
   if (calendar) {
     try {
       const effectiveParsed = updates.schedule !== undefined ? parseSchedule(updates.schedule) : task.parsed;
@@ -1079,8 +1091,10 @@ export function updateTask(
   }
   const patch: Record<string, unknown> = {};
   const eventPatch: Record<string, unknown> = {};
-  if (updates.calendar !== undefined) {
+  if (updates.calendar !== undefined || updates.calendarDayType !== undefined) {
     patch.calendar = calendar;
+    patch.calendarDayType = calendarDayType;
+    eventPatch.calendarDayType = calendarDayType ?? null;
     patch.lastCalendarCheck = undefined;
     eventPatch.calendar = calendar ?? null;
     eventPatch.lastCalendarCheck = null;

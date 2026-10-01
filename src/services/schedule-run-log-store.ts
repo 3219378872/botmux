@@ -197,6 +197,9 @@ function projectCalendarCheck(value: unknown): ScheduleRunLogEntry['calendarChec
   if (typeof raw.calendar !== 'string' || typeof raw.reason !== 'string'
     || !['working', 'rest', 'error', 'bypassed'].includes(String(raw.status))) return undefined;
   return { calendar: raw.calendar, status: raw.status as 'working' | 'rest' | 'error' | 'bypassed',
+    ...(raw.dayType === 'workday' || raw.dayType === 'restday' ? { dayType: raw.dayType } : {}),
+    ...(typeof raw.matches === 'boolean' ? { matches: raw.matches } : {}),
+    ...(raw.displayNames && typeof raw.displayNames === 'object' ? { displayNames: Object.fromEntries(Object.entries(raw.displayNames).filter(([key, value]) => ['zh', 'en'].includes(key) && typeof value === 'string' && value.length <= 120)) } : {}),
     reason: raw.reason as NonNullable<ScheduleRunLogEntry['calendarCheck']>['reason'],
     ...(typeof raw.date === 'string' ? { date: raw.date } : {}),
     ...(typeof raw.timeZone === 'string' ? { timeZone: raw.timeZone } : {}) };

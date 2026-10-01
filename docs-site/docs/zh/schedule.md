@@ -209,17 +209,17 @@ botmux schedule update <id> --prompt "新的完整提示词"
 
 绑定了守护前置条件（precondition）的任务不能用 `update` 修改：前置条件记录了任务输入的校验哈希，而其定义文件保存在宿主侧、沙盒内无法重绑；直接改 prompt 会让任务之后每次触发都校验失败、静默停止。这类任务请在 Dashboard 的定时任务页修改。
 
-## 可选工作日历
+## 自定义工作日历
 
 发布、日报和提醒可以按任务绑定工作日历。未绑定的存量任务保持原有行为；调度 tick 读取本地数据，不访问网络，也不让模型判断节假日。
 
-每份命名日历是独立实体，名称即任务绑定的日历 ID。内置 `cn`、未来增加的地区日历以及用户定义的 `company-shifts` 等日历，都使用相同的时区、覆盖区间、工作星期和日期覆盖规则。地区只是描述日历的可选元数据，不是调度器的分支或全局开关；不要求用户自定义日历归属于某个地区。同一 Bot 可拥有多份日历，不同任务可分别选择。
+每份日历是独立实体，以稳定的 ID 绑定任务；界面显示名称与 ID 分开。任务可选择“仅工作日”或“仅休息日”，未选择日历则沿用原计划。未指定执行日期类型的已有绑定保持“仅工作日”。“休息日”包含该日历确认的非工作日期，例如未补班的周末和放假日；未知日期不属于可执行的休息日。内置 `cn`、未来增加的地区日历以及用户定义的 `company-shifts` 等日历，都使用相同的时区、覆盖区间、工作星期和日期覆盖规则。地区只是描述日历的可选元数据，不是调度器的分支或全局开关；不要求用户自定义日历归属于某个地区。同一 Bot 可拥有多份日历，不同任务可分别选择。
 
 新增内置日历只需添加数据并在 `src/services/work-calendars/catalog.ts` 注册实体，随后核实来源、日期及测试；解析与调度逻辑无需增加地区分支。用户自定义日历只需在本 Bot 的 `work-calendars.json` 添加命名数据，然后按名称绑定，不需要修改代码。
 
 ### 中国大陆全国统一工作日历
 
-首期内置的法定日历只有 `cn`：中国大陆全国统一放假调休安排，时区为 `Asia/Shanghai`，包含平日放假和周末补班。**当前已核实覆盖 2026-01-01 至 2026-12-31**，无需创建 Bot 本地日历文件即可使用：
+首期内置的法定日历显示为“中国法定工作日历 / China Statutory Work Calendar”（ID 为 `cn`）：中国大陆全国统一放假调休安排，时区为 `Asia/Shanghai`，包含平日放假和周末补班。**当前已核实覆盖 2026-01-01 至 2026-12-31**，无需创建 Bot 本地日历文件即可使用：
 
 ```bash
 botmux schedule add "0 9 * * *" "生成日报" --calendar cn
@@ -246,6 +246,7 @@ botmux schedule calendars
   "calendars": {
     "demo": {
       "timeZone": "Asia/Shanghai",
+      "displayNames": { "zh": "演示工作日历", "en": "Demo Work Calendar" },
       "coverage": { "start": "2027-12-30", "end": "2028-12-31" },
       "workWeek": [1, 2, 3, 4, 5],
       "restDates": ["2028-01-04"],
@@ -261,13 +262,14 @@ botmux schedule calendars
 | --- | --- |
 | `version` | 文件 schema 版本，目前为 `1` |
 | `calendars` | 日历名到定义的映射，名称为 1–64 个字母、数字、`_` 或 `-`，首字符须为字母或数字 |
+| `displayNames` | 可选的中英文显示名称（`zh`、`en`）；未提供时显示日历 ID，界面语言切换不会改变绑定 |
 | `timeZone` | 日历使用的 IANA 时区；按实际执行瞬间换算当地日期，与 cron 的 `scheduleTimeZone` 分开配置 |
 | `coverage.start/end` | 已确认数据覆盖的闭区间，必须是有效 `YYYY-MM-DD` 日期 |
 | `workWeek` | 默认工作星期，`0` 是周日、`1` 是周一，以此类推；可为空数组 |
 | `restDates` | 覆盖默认星期的明确休息日期 |
 | `workDates` | 覆盖默认星期的明确工作日期（如周末补班） |
 
-所有定义字段均必填；日期必须有效且处于覆盖范围内。重复日期、同一天同时列入休息和工作、重复星期、非法时区或反向覆盖区间都会拒绝该定义。文件最大 1 MiB。某个定义损坏不影响其他有效定义，但整个文件格式损坏会阻止所有绑定该文件的自动任务；内置 `cn` 不受影响。
+除可选 `displayNames` 外，所有定义字段均必填；日期必须有效且处于覆盖范围内。重复日期、同一天同时列入休息和工作、重复星期、非法时区或反向覆盖区间都会拒绝该定义。文件最大 1 MiB。某个定义损坏不影响其他有效定义，但整个文件格式损坏会阻止所有绑定该文件的自动任务；内置 `cn` 不受影响。
 
 ### 绑定和回读
 
@@ -281,27 +283,29 @@ botmux schedule list
 
 # 更新或移除绑定，保留原来的 prompt、投递位置和 owner
 botmux schedule update <task-id> --calendar cn
+# 仅在休息日执行（工作日任务的默认值为 workday）
+botmux schedule update <task-id> --calendar-day-type restday
 botmux schedule update <task-id> --calendar none
 ```
 
 CLI 的 `--calendar none` 是移除绑定的保留值，不作为日历名使用。绑定了受保护 Bash precondition 的任务需在 Dashboard 编辑，以便同时更新其 canonical input 绑定。
 
-Dashboard 创建/编辑任务时可填写“工作日历”名称，中国大陆全国统一安排填 `cn`，留空取消绑定。任务行显示原始“下次”触发、日历名称、日历判断原因和“日历允许的下次触发”。API 的创建/更新 DTO 使用 `calendar: "cn"`，更新时 `calendar: null` 清除；列表回读包含 `calendar`、`calendarCheck`、`nextEligibleRunAt`，以及最近一次检查的 `lastCalendarCheck`。
+Dashboard 的“自定义工作日历”区域通过下拉框选择日历，内置日历显示正式中英文名称；“执行日期”可选“仅工作日 / Workdays only”或“仅休息日 / Rest days only”。选择“不使用工作日历”取消绑定。日历列表按所属 Bot 加载，包含本地自定义日历。任务行显示原始“下次”触发、日历名称、日历判断原因和“日历允许的下次触发”。API 的创建/更新 DTO 使用 `calendar: "cn"` 和 `calendarDayType: "workday" | "restday"`（默认 `workday`），更新时 `calendar: null` 清除；列表回读包含 `calendar`、`calendarCheck`、`nextEligibleRunAt`，以及最近一次检查的 `lastCalendarCheck`。
 
-日历允许的下次触发是预览：它只过滤已有 cron/interval 候选，不保证 Bash precondition 通过、模型成功或消息投递成功。原始 `nextRunAt` 保留原调度语义。扫描最多 10,000 个候选本地日期；无法确认时返回 `null` 和明确原因（如 `search_limit` / `calendar_out_of_coverage`），不退化成周一至周五。
+日历允许的下次触发是预览：它只过滤已有 cron/interval 候选，不保证 Bash precondition 通过、模型成功或消息投递成功。原始 `nextRunAt` 保留原调度语义。扫描最多 10,000 个候选本地日期；无法确认时返回 `null` 和明确原因（如 `search_limit` / `calendar_out_of_coverage`），不退化成周一至周五，也不会把未知日期当作休息日。
 
 ### 自动、一次性和手动执行语义
 
 | 触发方式 | 日历行为 |
 | --- | --- |
-| 自动 cron | 在执行入口判断实际当地日期；休息日跳过，继续等待原 cron 的下一次候选 |
+| 自动 cron | 在执行入口判断实际当地日期；只有所选的工作日或休息日允许执行，其他日期跳过，继续等待原 cron 的下一次候选 |
 | 自动 interval | 同样过滤；跳过后继续原 interval 调度，不累积补跑；预览从当前计划保持间隔相位 |
 | once | 本 MVP 不支持绑定；创建或更新时拒绝，损坏/外部写入的 once 绑定也不会自动执行 |
 | Dashboard“立即执行” / `schedule run` | 显式手动执行绕过日历，保留原有 precondition 和执行规则；记录 `manual_bypass`。CLI 请求意图持久化并由所属 Bot 消费 |
 
-自动判断先于可能产生宿主副作用的 Bash precondition、模型调用、话题创建和消息通知。休息日记录 `lastStatus: skipped`、执行日志 `calendar_skipped`、`schedule.fired` hook 的 `status: skipped`，不会被计作执行失败，也不消耗有限重复次数。日历缺失、损坏、Bot scope 缺失或日期超覆盖时不执行，记录错误原因，不扣重复次数、不自动禁用任务；修复数据后可在后续候选继续执行。未绑定任务不受这些错误影响。
+自动判断先于可能产生宿主副作用的 Bash precondition、模型调用、话题创建和消息通知。不符合所选日期类型时记录 `lastStatus: skipped`、执行日志 `calendar_skipped`、`schedule.fired` hook 的 `status: skipped`，不会被计作执行失败，也不消耗有限重复次数。日历缺失、损坏、Bot scope 缺失或日期超覆盖时不执行，记录错误原因，不扣重复次数、不自动禁用任务；修复数据后可在后续候选继续执行。未绑定任务不受这些错误影响。
 
-常见原因：`work_date` / `work_week` 表示允许，`rest_date` / `rest_week` 表示跳过；`calendar_missing`、`calendar_invalid`、`calendar_out_of_coverage` 分别表示定义不存在、不可解析/验证、日期没有已确认覆盖。日期和时区随执行日志记录，正常允许与手动绕过也保留检查结果。
+常见原因：`work_date` / `work_week` 表示允许，`rest_date` / `rest_week` 表示跳过；`calendar_missing`、`calendar_invalid`、`calendar_out_of_coverage` 分别表示定义不存在、不可解析/验证、日期没有已确认覆盖。实际日期类型、所选执行日期、是否匹配、显示名称、日期和时区随执行日志记录，正常允许与手动绕过也保留检查结果。
 
 ### 业务迁移
 

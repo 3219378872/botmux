@@ -628,6 +628,9 @@ it('rebinds the protected Bash input after a Dashboard calendar edit', () => {
   const after = getTask(task.id)!;
   expect(after.calendar).toBe('demo');
   expect(resolveSchedulePrecondition(after, APP_ID)).toMatchObject({ kind: 'configured', enabled: true });
+  expect(updateTaskWithOptionalPrecondition(task.id, { calendarDayType: 'restday' }, APP_ID)).toMatchObject({ ok: true });
+  expect(getTask(task.id)?.calendarDayType).toBe('restday');
+  expect(resolveSchedulePrecondition(getTask(task.id)!, APP_ID)).toMatchObject({ kind: 'configured', enabled: true });
   expect(updateTaskWithOptionalPrecondition(task.id, { calendar: null }, APP_ID)).toMatchObject({ ok: true });
   expect(resolveSchedulePrecondition(getTask(task.id)!, APP_ID)).toMatchObject({ kind: 'configured' });
 });

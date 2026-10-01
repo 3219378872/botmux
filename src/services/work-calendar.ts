@@ -18,6 +18,7 @@ const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
   return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }, 'invalid_date');
 const definitionSchema = z.object({
+  displayNames: z.object({ zh: z.string().min(1).max(120).optional(), en: z.string().min(1).max(120).optional() }).strict().optional(),
   timeZone: z.string().refine(value => {
     try { new Intl.DateTimeFormat('en-US', { timeZone: value }); return value !== 'Etc/Unknown'; }
     catch { return false; }
@@ -39,15 +40,19 @@ const definitionSchema = z.object({
   }
 });
 export type WorkCalendar = z.infer<typeof definitionSchema>;
+export type CalendarDayType = 'workday' | 'restday';
 export type CalendarReason = 'work_date' | 'rest_date' | 'work_week' | 'rest_week'
   | 'calendar_missing' | 'calendar_invalid' | 'calendar_out_of_coverage'
-  | 'manual_bypass' | 'calendar_scope_missing' | 'calendar_once_unsupported' | 'search_limit' | 'schedule_exhausted';
+  | 'manual_bypass' | 'calendar_scope_missing' | 'calendar_once_unsupported' | 'invalid_calendar_day_type' | 'search_limit' | 'schedule_exhausted';
 export interface CalendarCheck {
   calendar: string;
   status: 'working' | 'rest' | 'error' | 'bypassed';
   reason: CalendarReason;
   date?: string;
   timeZone?: string;
+  displayNames?: WorkCalendar['displayNames'];
+  dayType?: CalendarDayType;
+  matches?: boolean;
 }
 export interface CalendarPreview {
   nextEligibleRunAt: string | null;
@@ -58,6 +63,12 @@ export function normalizeCalendarBinding(value: unknown): string | undefined {
   if (value === undefined || value === null || value === '') return undefined;
   if (typeof value !== 'string' || value === 'none' || !NAME.test(value)) throw new Error('invalid_calendar_name');
   return value;
+}
+
+export function normalizeCalendarDayType(value: unknown): CalendarDayType {
+  if (value === undefined || value === null || value === 'workday') return 'workday';
+  if (value === 'restday') return 'restday';
+  throw new Error('invalid_calendar_day_type');
 }
 
 export function workCalendarPath(appId: string, dataDir = config.session.dataDir): string {
@@ -84,7 +95,8 @@ function resolveCalendar(name: unknown, appId: string | undefined): WorkCalendar
   if (!normalizeCalendarBinding(name)) throw new Error('calendar_invalid');
   // Built-in IDs are reserved; local entities use their own IDs and the same rule schema.
   if (Object.hasOwn(BUILTIN_WORK_CALENDARS, name as string)) {
-    return parseWorkCalendar(BUILTIN_WORK_CALENDARS[name as string].calendar);
+    const entity = BUILTIN_WORK_CALENDARS[name as string];
+    return { ...parseWorkCalendar(entity.calendar), displayNames: entity.displayNames };
   }
   let definitions: Record<string, unknown>;
   try { definitions = readWorkCalendarDefinitions(appId); }
@@ -96,13 +108,37 @@ function resolveCalendar(name: unknown, appId: string | undefined): WorkCalendar
   return parseWorkCalendar(definitions[name as string]);
 }
 
+export function listWorkCalendars(appId: string): { calendars: Array<{
+  id: string; kind: 'builtin' | 'local'; displayNames?: WorkCalendar['displayNames'];
+  timeZone?: string; coverage?: WorkCalendar['coverage']; error?: string;
+}>; localError?: string } {
+  const calendars: ReturnType<typeof listWorkCalendars>['calendars'] = Object.entries(BUILTIN_WORK_CALENDARS).map(([id, entity]) => {
+    const data = parseWorkCalendar(entity.calendar);
+    return { id, kind: 'builtin', displayNames: entity.displayNames, timeZone: data.timeZone, coverage: data.coverage };
+  });
+  let definitions: Record<string, unknown>;
+  try { definitions = readWorkCalendarDefinitions(appId); }
+  catch (error) {
+    return { calendars, ...((error as NodeJS.ErrnoException).code === 'ENOENT' ? {} : { localError: 'calendar_invalid' }) };
+  }
+  for (const [id, value] of Object.entries(definitions)) {
+    if (Object.hasOwn(BUILTIN_WORK_CALENDARS, id)) continue;
+    try {
+      normalizeCalendarBinding(id);
+      const data = parseWorkCalendar(value);
+      calendars.push({ id, kind: 'local', displayNames: data.displayNames, timeZone: data.timeZone, coverage: data.coverage });
+    } catch { calendars.push({ id, kind: 'local', error: 'calendar_invalid' }); }
+  }
+  return { calendars };
+}
+
 export function checkWorkCalendar(calendar: WorkCalendar, name: string, instant: Date): CalendarCheck {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: calendar.timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
   }).formatToParts(instant);
   const part = (type: string) => parts.find(p => p.type === type)!.value;
   const date = `${part('year')}-${part('month')}-${part('day')}`;
-  const base = { calendar: name, date, timeZone: calendar.timeZone };
+  const base = { calendar: name, date, timeZone: calendar.timeZone, ...(calendar.displayNames ? { displayNames: calendar.displayNames } : {}) };
   if (date < calendar.coverage.start || date > calendar.coverage.end) {
     return { ...base, status: 'error', reason: 'calendar_out_of_coverage' };
   }
@@ -114,28 +150,39 @@ export function checkWorkCalendar(calendar: WorkCalendar, name: string, instant:
 
 function calendarError(task: Pick<ScheduledTask, 'calendar'>, error: unknown): CalendarCheck {
   const code = error instanceof Error ? error.message : '';
-  const reason = ['calendar_missing', 'calendar_scope_missing'].includes(code)
+  const reason = ['calendar_missing', 'calendar_scope_missing', 'invalid_calendar_day_type'].includes(code)
     ? code as CalendarReason : 'calendar_invalid';
-  return { calendar: typeof task.calendar === 'string' && NAME.test(task.calendar) ? task.calendar : '(invalid)', status: 'error', reason };
+  return { calendar: typeof task.calendar === 'string' && NAME.test(task.calendar) ? task.calendar : '(invalid)', status: 'error', reason, ...builtinDisplayNames(task.calendar) };
+}
+
+function builtinDisplayNames(name: string | undefined): Pick<CalendarCheck, 'displayNames'> {
+  return name && Object.hasOwn(BUILTIN_WORK_CALENDARS, name)
+    ? { displayNames: BUILTIN_WORK_CALENDARS[name].displayNames } : {};
+}
+
+function checkForTask(calendar: WorkCalendar, task: Pick<ScheduledTask, 'calendar' | 'calendarDayType'>, instant: Date): CalendarCheck {
+  const dayType = normalizeCalendarDayType(task.calendarDayType);
+  const check = checkWorkCalendar(calendar, task.calendar!, instant);
+  return { ...check, dayType, matches: check.status === (dayType === 'restday' ? 'rest' : 'working') };
 }
 
 /** Evaluate the actual dispatch instant, including a late catch-up after restart. */
 export function checkTaskCalendar(
-  task: Pick<ScheduledTask, 'calendar' | 'parsed' | 'larkAppId'>,
+  task: Pick<ScheduledTask, 'calendar' | 'calendarDayType' | 'parsed' | 'larkAppId'>,
   appId = task.larkAppId,
   instant = new Date(),
 ): CalendarCheck | undefined {
   if (task.calendar === undefined) return undefined;
   if (task.parsed.kind === 'once') {
-    return { calendar: task.calendar, status: 'error', reason: 'calendar_once_unsupported' };
+    return { calendar: task.calendar, status: 'error', reason: 'calendar_once_unsupported', ...builtinDisplayNames(task.calendar) };
   }
-  try { return checkWorkCalendar(resolveCalendar(task.calendar, appId), task.calendar, instant); }
+  try { return checkForTask(resolveCalendar(task.calendar, appId), task, instant); }
   catch (error) { return calendarError(task, error); }
 }
 
 /** Preview only: never rewrites the raw cron/interval trigger or creates weekend triggers. */
 export function previewTaskCalendar(
-  task: Pick<ScheduledTask, 'calendar' | 'parsed' | 'larkAppId' | 'nextRunAt'>,
+  task: Pick<ScheduledTask, 'calendar' | 'calendarDayType' | 'parsed' | 'larkAppId' | 'nextRunAt'>,
   appId = task.larkAppId,
   now = new Date(),
 ): CalendarPreview | undefined {
@@ -143,15 +190,15 @@ export function previewTaskCalendar(
   if (task.parsed.kind === 'once') return { nextEligibleRunAt: null, calendarCheck: checkTaskCalendar(task, appId, now)! };
   try {
     const calendar = resolveCalendar(task.calendar, appId);
-    const current = checkWorkCalendar(calendar, task.calendar, now);
+    const current = checkForTask(calendar, task, now);
     const job = task.parsed.kind === 'cron' && task.parsed.expr
       ? new Cron(task.parsed.expr, { timezone: scheduleTimeZone() }) : undefined;
     const interval = (task.parsed.minutes ?? 0) * 60_000;
     let candidate = task.nextRunAt ? new Date(task.nextRunAt) : undefined;
     if (!candidate || candidate < now) candidate = job?.nextRun(now) ?? (interval > 0 ? new Date(+now + interval) : undefined);
     for (let i = 0; candidate && i < MAX_CANDIDATES; i++) {
-      const check = checkWorkCalendar(calendar, task.calendar, candidate);
-      if (check.status === 'working') return { nextEligibleRunAt: candidate.toISOString(), calendarCheck: current };
+      const check = checkForTask(calendar, task, candidate);
+      if (check.matches) return { nextEligibleRunAt: candidate.toISOString(), calendarCheck: current };
       // Before coverage starts we can still search forward, but never infer a workday.
       if (check.status === 'error' && check.date! > calendar.coverage.end) {
         return { nextEligibleRunAt: null, calendarCheck: check };
@@ -170,6 +217,6 @@ export function previewTaskCalendar(
   } catch (error) { return { nextEligibleRunAt: null, calendarCheck: calendarError(task, error) }; }
 }
 
-export function manualCalendarCheck(task: Pick<ScheduledTask, 'calendar'>): CalendarCheck | undefined {
-  return task.calendar === undefined ? undefined : { calendar: task.calendar, status: 'bypassed', reason: 'manual_bypass' };
+export function manualCalendarCheck(task: Pick<ScheduledTask, 'calendar' | 'calendarDayType'>): CalendarCheck | undefined {
+  return task.calendar === undefined ? undefined : { calendar: task.calendar, status: 'bypassed', reason: 'manual_bypass', dayType: task.calendarDayType === 'restday' ? 'restday' : 'workday', ...builtinDisplayNames(task.calendar) };
 }

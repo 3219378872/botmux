@@ -192,11 +192,19 @@ describe('work calendar CLI configuration and persisted manual intent', () => {
     const updated = await f.run(['update', f.task.id, '--calendar', 'cn']);
     expect(updated.code, updated.output).toBe(0);
     expect(f.read()[f.task.id]).toMatchObject({ calendar: 'cn', ownerOpenId: f.task.ownerOpenId });
+    const rest = await f.run(['update', f.task.id, '--calendar-day-type', 'restday']);
+    expect(rest.code, rest.output).toBe(0);
+    expect(f.read()[f.task.id]).toMatchObject({ calendar: 'cn', calendarDayType: 'restday' });
+    const invalid = await f.run(['update', f.task.id, '--calendar-day-type', 'weekend']);
+    expect(invalid.code).not.toBe(0);
+    expect(f.read()[f.task.id].calendarDayType).toBe('restday');
     const local = join(f.root, '.botmux', 'bots', app, 'work-calendars.json');
     writeFileSync(local, JSON.stringify({ version: 1, calendars: { cn: {} } }));
     const shadowed = await f.run(['calendars']);
     expect(shadowed.code, shadowed.output).toBe(0);
     expect(shadowed.output).toContain('reserved_builtin_calendar');
+    expect((await f.run(['update', f.task.id, '--calendar', 'none'])).code).toBe(0);
+    expect(f.read()[f.task.id].calendarDayType).toBeUndefined();
   });
   it('binds, reads in another process and clears a calendar without changing routing/owner', async () => {
     const f = fixture();
@@ -223,8 +231,8 @@ describe('work calendar CLI configuration and persisted manual intent', () => {
   });
   it('adds with --calendar and preserves exact prompt bytes', async () => {
     const f = fixture();
-    const added = await f.run(['add', '0 9 * * *', 'fixture prompt', '--id', 'aabbcc01', '--calendar', 'demo', '--chat-id', 'fixture_chat', '--new-topic', '--workdir', f.root]);
+    const added = await f.run(['add', '0 9 * * *', 'fixture prompt', '--id', 'aabbcc01', '--calendar', 'demo', '--calendar-day-type', 'restday', '--chat-id', 'fixture_chat', '--new-topic', '--workdir', f.root]);
     expect(added.code, added.output).toBe(0);
-    expect(f.read().aabbcc01).toMatchObject({ calendar: 'demo', prompt: 'fixture prompt', executionPosition: 'new-topic', larkAppId: app });
+    expect(f.read().aabbcc01).toMatchObject({ calendar: 'demo', calendarDayType: 'restday', prompt: 'fixture prompt', executionPosition: 'new-topic', larkAppId: app });
   });
 });

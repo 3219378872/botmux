@@ -77,6 +77,42 @@ function snapshot(id: string) { return JSON.parse(readFileSync(scheduleFilePathF
 
 describe('calendar admission before task side effects', () => {
   it.each([
+    ['2026-10-01T01:00:00Z', true],
+    ['2026-10-10T01:00:00Z', false],
+    ['2027-01-01T01:00:00Z', false],
+  ])('runs rest-day tasks only on confirmed CN rest dates at %s', async (now, allowed) => {
+    vi.setSystemTime(new Date(now));
+    const task = create('cn', { calendarDayType: 'restday' });
+    const gate = installGate();
+    startScheduler();
+    await advance();
+    expect(gate.bash).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    expect(gate.model).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    expect(snapshot(task.id)).toMatchObject({ calendarDayType: 'restday', repeat: { completed: allowed ? 1 : 0 } });
+    if (!allowed && !now.startsWith('2027')) {
+      expect(queryScheduleRunLogs(task.id, {}, APP).logs[0]).toMatchObject({ outcome: 'calendar_skipped', calendarCheck: { status: 'working', dayType: 'restday', matches: false, displayNames: { zh: '中国法定工作日历' } } });
+    }
+  });
+  it('preserves rest-day selection through JSON reload and scheduler restart', async () => {
+    vi.setSystemTime(new Date('2028-01-03T01:00:00Z'));
+    const task = create('demo', { calendarDayType: 'restday' });
+    startScheduler();
+    await advance();
+    stopScheduler();
+    const persisted = snapshot(task.id);
+    config.session.dataDir = join(root, 'reloaded', 'data');
+    importTasks(APP, [[task.id, persisted]]);
+    const file = workCalendarPath(APP);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ version: 1, calendars: { demo: { ...fixture.calendars.demo, workWeek: [] } } }));
+    const execute = vi.fn(async () => undefined);
+    setExecuteCallback(execute);
+    startScheduler();
+    await advance();
+    expect(getTask(task.id)?.calendarDayType).toBe('restday');
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+  it.each([
     ['2026-10-01T01:00:00Z', false],
     ['2026-10-10T01:00:00Z', true],
     ['2027-01-01T01:00:00Z', false],

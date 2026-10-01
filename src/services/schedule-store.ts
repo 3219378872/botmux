@@ -88,6 +88,7 @@ export class IdempotencyConflictError extends Error {
  */
 export function canonicalScheduleInput(t: {
   calendar?: string;
+  calendarDayType?: import('./work-calendar.js').CalendarDayType;
   name: string;
   schedule: string;
   parsed?: ParsedSchedule;
@@ -115,6 +116,7 @@ export function canonicalScheduleInput(t: {
   const targets = normalizeScheduleChatTargets({ chatId: t.chatId, chatIds: t.chatIds });
   return {
     calendar: t.calendar,
+    calendarDayType: t.calendar && t.calendarDayType !== 'workday' ? t.calendarDayType : undefined,
     name: t.name,
     schedule: t.schedule,
     parsed: t.parsed
@@ -343,6 +345,7 @@ function migrate(raw: any): ScheduledTask | null {
     id: raw.id,
     // Preserve malformed bindings so runtime fails closed instead of dropping the gate.
     calendar: raw.calendar,
+    calendarDayType: raw.calendarDayType,
     lastCalendarCheck: raw.lastCalendarCheck,
     manualRunRequested: raw.manualRunRequested === true ? true : undefined,
     preconditionRef: typeof raw.preconditionRef === 'string' && raw.preconditionRef
@@ -597,6 +600,7 @@ export function createTask(params: {
   id?: string;
   preconditionRef?: string;
   calendar?: string;
+  calendarDayType?: import('./work-calendar.js').CalendarDayType;
   name: string;
   schedule: string;
   parsed: ParsedSchedule;
@@ -661,6 +665,7 @@ export function createTask(params: {
       id,
       preconditionRef: params.preconditionRef,
       calendar: params.calendar,
+      calendarDayType: params.calendarDayType,
       name: params.name,
       schedule: params.schedule,
       parsed: params.parsed,
@@ -713,7 +718,7 @@ export function removeTask(id: string, appId?: string): boolean {
 export function updateTask(
   id: string,
   updates: Partial<Pick<ScheduledTask,
-    'calendar' | 'lastCalendarCheck' | 'manualRunRequested' | 'enabled' | 'disabledReason' | 'lastRunAt' | 'nextRunAt' | 'lastStatus' | 'lastRunId' | 'lastError' | 'lastDeliveryError' | 'repeat' | 'rootMessageId' | 'scope' | 'executionPosition' | 'topicTitle' | 'chatType' | 'deliver' | 'name' | 'prompt' | 'schedule' | 'parsed' | 'silent' | 'workingDir' | 'followActive' | 'preconditionRef' | 'chatId' | 'model' | 'reasoningEffort'
+    'calendar' | 'calendarDayType' | 'lastCalendarCheck' | 'manualRunRequested' | 'enabled' | 'disabledReason' | 'lastRunAt' | 'nextRunAt' | 'lastStatus' | 'lastRunId' | 'lastError' | 'lastDeliveryError' | 'repeat' | 'rootMessageId' | 'scope' | 'executionPosition' | 'topicTitle' | 'chatType' | 'deliver' | 'name' | 'prompt' | 'schedule' | 'parsed' | 'silent' | 'workingDir' | 'followActive' | 'preconditionRef' | 'chatId' | 'model' | 'reasoningEffort'
   >> & { chatIds?: readonly string[] | null },
   appId?: string,
 ): boolean {

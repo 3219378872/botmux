@@ -1,4 +1,4 @@
-import { normalizeCalendarBinding, previewTaskCalendar } from '../services/work-calendar.js';
+import { normalizeCalendarBinding, normalizeCalendarDayType, listWorkCalendars, previewTaskCalendar } from '../services/work-calendar.js';
 import { resolveWorkspace } from './workspace-metadata.js';
 // src/core/dashboard-ipc-server.ts
 import { parseHandoffCardEvent } from './handoff-card-lifecycle.js';
@@ -4297,6 +4297,7 @@ function parseSchedulePreconditionWrite(
 export interface ScheduleRow {
   id: string;
   calendar?: string;
+  calendarDayType?: import('../services/work-calendar.js').CalendarDayType;
   lastCalendarCheck?: ScheduledTask['lastCalendarCheck'];
   nextEligibleRunAt?: string | null;
   calendarCheck?: ScheduledTask['lastCalendarCheck'];
@@ -4495,6 +4496,7 @@ function schedulePreconditionProjection(
 function composeScheduleRow(t: ScheduledTask): ScheduleRow {
   return {
     calendar: t.calendar,
+    calendarDayType: t.calendar ? t.calendarDayType ?? 'workday' : undefined,
     lastCalendarCheck: t.lastCalendarCheck,
     ...previewTaskCalendar(t, t.larkAppId ?? cachedLarkAppId),
     id: t.id,
@@ -4527,6 +4529,11 @@ function composeScheduleRow(t: ScheduledTask): ScheduleRow {
     feishuChatLink: feishuChatLink(t.chatId, getBotBrand(t.larkAppId)),
   };
 }
+
+ipcRoute('GET', '/api/schedules/calendars', (_req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+  jsonRes(res, 200, listWorkCalendars(cachedLarkAppId));
+});
 
 ipcRoute('GET', '/api/schedules', (_req, res) => {
   // Filter to tasks owned by this daemon's bot (multi-bot setups run one
@@ -4707,6 +4714,9 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
   let calendar: string | undefined;
   try { calendar = normalizeCalendarBinding(b.calendar); }
   catch { return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'calendar' }); }
+  let calendarDayType: import('../services/work-calendar.js').CalendarDayType;
+  try { calendarDayType = normalizeCalendarDayType(b.calendarDayType); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'calendarDayType' }); }
   const precondition = parseSchedulePreconditionWrite(b, 'create');
   if (!precondition.ok) {
     return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: precondition.field });
@@ -4836,6 +4846,7 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
       silent,
       followActive: followActive || undefined,
       calendar,
+      calendarDayType,
       model: modelWrite.model ?? undefined,
       reasoningEffort: modelWrite.reasoningEffort ?? undefined,
     }, cachedLarkAppId, precondition.create);
@@ -4858,6 +4869,7 @@ ipcRoute('PATCH', '/api/schedules/:id', async (req, res, p) => {
   const b = body as Record<string, unknown>;
   const updates: {
     name?: string; prompt?: string; schedule?: string; calendar?: string | null;
+    calendarDayType?: import('../services/work-calendar.js').CalendarDayType | null;
     deliver?: 'origin' | 'new-topic'; silent?: boolean;
     executionPosition?: ScheduleExecutionPosition; rootMessageId?: string; topicTitle?: string;
     chatId?: string; chatIds?: readonly string[] | null;
@@ -4874,6 +4886,10 @@ ipcRoute('PATCH', '/api/schedules/:id', async (req, res, p) => {
   if (b.calendar !== undefined) {
     try { updates.calendar = normalizeCalendarBinding(b.calendar) ?? null; }
     catch { return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'calendar' }); }
+  }
+  if (b.calendarDayType !== undefined) {
+    try { updates.calendarDayType = normalizeCalendarDayType(b.calendarDayType); }
+    catch { return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'calendarDayType' }); }
   }
   const precondition = parseSchedulePreconditionWrite(b, 'update');
   if (!precondition.ok) {
@@ -4976,6 +4992,13 @@ ipcRoute('PATCH', '/api/schedules/:id', async (req, res, p) => {
   }
   if (!result.ok) return jsonRes(res, 400, result);
   const task = result.task ?? scheduleStore.getTask(p.id);
+  if (task && (updates.calendar !== undefined || updates.calendarDayType !== undefined)) {
+    const row = composeScheduleRow(task);
+    dashboardEventBus.publish({ type: 'schedule.updated', body: { id: p.id, patch: {
+      calendar: row.calendar ?? null, calendarDayType: row.calendarDayType ?? null,
+      calendarCheck: row.calendarCheck ?? null, nextEligibleRunAt: row.nextEligibleRunAt ?? null,
+    } } });
+  }
   if (precondition.supplied) {
     const projection: ReturnType<typeof schedulePreconditionProjection> = task
       ? schedulePreconditionProjection(task)

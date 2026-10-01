@@ -1,5 +1,6 @@
 {
   "region": "CN",
+  "displayNames": { "zh": "中国法定工作日历", "en": "China Statutory Work Calendar" },
   "scope": "中国大陆全国统一放假调休安排",
   "dataVersion": "2026.1",
   "source": {

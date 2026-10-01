@@ -5870,6 +5870,9 @@ describe('POST/PATCH /api/schedules — local work calendar', () => {
       writeFileSync(workCalendarPath(app), JSON.stringify(fixture));
       local = await startIpcServer({ port: 0, host: '127.0.0.1' });
       const base = `http://127.0.0.1:${local.port}`;
+      const catalog = await (await fetch(`${base}/api/schedules/calendars`)).json();
+      expect(catalog.calendars.find((row: any) => row.id === 'cn')).toMatchObject({ displayNames: { zh: '中国法定工作日历', en: 'China Statutory Work Calendar' } });
+      expect(catalog.calendars.some((row: any) => row.id === 'demo')).toBe(true);
       const create = (body: Record<string, unknown>) => fetch(`${base}/api/schedules`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ name: 'fixture', schedule: '0 9 * * *', prompt: 'fixture', chatId: 'fixture_chat', ...body }),
@@ -5885,6 +5888,11 @@ describe('POST/PATCH /api/schedules — local work calendar', () => {
       expect((await create({ calendar: '../bad' })).status).toBe(400);
       expect((await create({ calendar: 'demo', schedule: '30m' })).status).toBe(400);
       expect((await patch({ calendar: 42 })).status).toBe(400);
+      expect((await patch({ calendarDayType: 'weekend' })).status).toBe(400);
+      expect((await create({ calendarDayType: 'restday' })).status).toBe(400);
+      expect((await patch({ calendarDayType: 'restday' })).status).toBe(200);
+      expect(scheduleStore.getTask(task.id)?.calendarDayType).toBe('restday');
+      expect((await patch({ calendarDayType: 'workday' })).status).toBe(200);
       expect((await patch({ schedule: '30m' })).status).toBe(400);
       // Readback uses the persisted raw next trigger and the calendar's own zone.
       scheduleStore.updateTask(task.id, { nextRunAt: '2028-01-08T01:00:00.000Z' });
@@ -5903,6 +5911,7 @@ describe('POST/PATCH /api/schedules — local work calendar', () => {
       expect(cleared.status).toBe(200);
       expect((await cleared.json()).task.calendar).toBeUndefined();
       expect(scheduleStore.getTask(task.id)?.calendar).toBeUndefined();
+      expect(scheduleStore.getTask(task.id)?.calendarDayType).toBeUndefined();
     } finally {
       if (local) await local.close();
       config.session.dataDir = previous;

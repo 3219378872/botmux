@@ -7,6 +7,7 @@ import {
   checkTaskCalendar, checkWorkCalendar, normalizeCalendarBinding, parseWorkCalendar,
   previewTaskCalendar, workCalendarPath,
   BUILTIN_WORK_CALENDARS,
+  normalizeCalendarDayType, listWorkCalendars, manualCalendarCheck,
 } from '../src/services/work-calendar.js';
 import type { ScheduledTask } from '../src/types.js';
 import { readScheduleUpdate } from '../src/cli/schedule-update.js';
@@ -71,6 +72,32 @@ describe('local work calendar schema and dates', () => {
 });
 
 describe('calendar loading, isolation and next eligible trigger', () => {
+  it('selects rest days using the same data and never treats missing coverage as rest', () => {
+    const restTask = { ...task, calendarDayType: 'restday' as const };
+    expect(checkTaskCalendar(restTask, app, new Date('2028-01-04T01:00:00Z'))).toMatchObject({ status: 'rest', dayType: 'restday', matches: true });
+    expect(checkTaskCalendar(restTask, app, new Date('2028-01-08T01:00:00Z'))).toMatchObject({ status: 'working', dayType: 'restday', matches: false });
+    expect(checkTaskCalendar(restTask, app, new Date('2029-01-01T01:00:00Z'))).toMatchObject({ status: 'error', matches: false });
+    expect(previewTaskCalendar(restTask, app, new Date('2028-01-03T02:00:00Z'))?.nextEligibleRunAt).toBe('2028-01-04T01:00:00.000Z');
+    const interval = { ...restTask, parsed: { kind: 'interval' as const, minutes: 17, display: '17m' }, nextRunAt: '2028-01-03T15:58:00Z' };
+    expect(previewTaskCalendar(interval, app, new Date('2028-01-03T15:57:00Z'))?.nextEligibleRunAt).toBe('2028-01-03T16:15:00.000Z');
+    expect(checkTaskCalendar({ ...task, calendarDayType: 'bad' as any }, app)).toMatchObject({ status: 'error', reason: 'invalid_calendar_day_type' });
+    expect(normalizeCalendarDayType(undefined)).toBe('workday');
+    expect(() => normalizeCalendarDayType('weekday')).toThrow('invalid_calendar_day_type');
+    expect(readScheduleUpdate(['abcd1234', '--calendar-day-type', 'restday'])).toEqual({ calendarDayType: 'restday' });
+  });
+  it('lists translated built-in and user calendar names and isolates local data errors', () => {
+    writeFileSync(workCalendarPath(app), JSON.stringify({ version: 1, calendars: {
+      shifts: { ...definition, displayNames: { zh: '公司排班日历', en: 'Company Shift Calendar' } },
+      broken: {},
+    } }));
+    const list = listWorkCalendars(app);
+    expect(list.calendars.find(row => row.id === 'cn')).toMatchObject({ kind: 'builtin', displayNames: { zh: '中国法定工作日历', en: 'China Statutory Work Calendar' } });
+    expect(list.calendars.find(row => row.id === 'shifts')).toMatchObject({ displayNames: { zh: '公司排班日历', en: 'Company Shift Calendar' } });
+    expect(checkTaskCalendar({ ...task, calendar: 'shifts' }, app, new Date('2028-01-04T01:00:00Z'))).toMatchObject({ displayNames: { zh: '公司排班日历' } });
+    expect(list.calendars.find(row => row.id === 'broken')?.error).toBe('calendar_invalid');
+    writeFileSync(workCalendarPath(app), '{broken');
+    expect(listWorkCalendars(app)).toMatchObject({ localError: 'calendar_invalid', calendars: [{ id: 'cn' }] });
+  });
   it('fails closed for missing/invalid data and remains independent of unbound tasks', () => {
     expect(checkTaskCalendar({ ...task, calendar: undefined })).toBeUndefined();
     expect(checkTaskCalendar({ ...task, calendar: 'absent' })).toMatchObject({ status: 'error', reason: 'calendar_missing' });
@@ -161,6 +188,9 @@ describe('mainland China official 2026 snapshot', () => {
     if (status === 'error') expect(checkTaskCalendar(cnTask, app, new Date(instant))?.reason).toBe('calendar_out_of_coverage');
   });
   it('previews the official Saturday makeup trigger and reports unknown next-year data', () => {
+    expect(manualCalendarCheck(cnTask)?.displayNames?.zh).toBe('中国法定工作日历');
+    expect(checkTaskCalendar({ ...cnTask, calendarDayType: 'invalid' as never }, app)?.displayNames?.en).toBe('China Statutory Work Calendar');
+    expect(checkTaskCalendar({ ...cnTask, parsed: { kind: 'once', display: 'once' } }, app)?.displayNames?.zh).toBe('中国法定工作日历');
     expect(previewTaskCalendar(cnTask, app, new Date('2026-10-09T02:00:00Z'))?.nextEligibleRunAt).toBe('2026-10-10T01:00:00.000Z');
     expect(previewTaskCalendar(cnTask, app, new Date('2026-12-31T02:00:00Z'))).toMatchObject({ nextEligibleRunAt: null, calendarCheck: { reason: 'calendar_out_of_coverage' } });
   });
