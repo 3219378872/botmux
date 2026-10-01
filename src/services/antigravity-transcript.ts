@@ -36,21 +36,28 @@
  *   - a GENERIC record with status:"RUNNING" (every RUNNING GENERIC in
  *     observed logs is one) whose content says "Tool is running as a
  *     background task"
- * sets hasPendingTask. Tool NAMES are deliberately NOT used: `manage_task` /
- * `schedule` are ALSO called synchronously to poll task status (their GENERIC
- * result is DONE, not RUNNING), so the name alone would latch waits that
- * already ended and hold the real final forever. While the flag is set,
- * flushTrailingFinal is refused no matter how quiet the screen is. The flag
- * clears when the wait is actually over — the completion SYSTEM_MESSAGE, OR a
- * FOREGROUND tool call after a GENERIC DONE: when a background task finishes
- * without a SYSTEM_MESSAGE (observed in real logs) the planner's next step is
- * an ordinary tool call, equivalent proof the wait ended. It also clears on
- * the next USER_INPUT.
+ * sets hasPendingTask. Tool NAMES are deliberately NOT used to SET the flag:
+ * `manage_task` / `schedule` are ALSO called synchronously to poll task status
+ * (their GENERIC result is DONE, not RUNNING), so a name alone would latch
+ * waits that already ended. While the flag is set, flushTrailingFinal is
+ * refused no matter how quiet the screen is. The flag clears only on proof the
+ * wait actually ended:
+ *   - the completion SYSTEM_MESSAGE / an ERROR,
+ *   - a FOREGROUND tool call (run_command/read/edit/…), including when a
+ *     background task finishes WITHOUT a SYSTEM_MESSAGE and the planner wraps
+ *     up itself (session 098f4ab3),
+ *   - the next USER_INPUT.
+ * A call whose tools are ALL `manage_task`/`schedule` does NOT clear it —
+ * those calls ARE the launch/poll mechanism, and the RUNNING record plus them
+ * are written out of step_index order in real logs (clearing on every
+ * PLANNER tool_call dropped the flag for ~63% of build/review waits).
  *
- * Continuation records cancel a held candidate: a PLANNER_RESPONSE carrying a
- * non-empty tool_calls array, a GENERIC tool-output line, or a
- * SYSTEM_MESSAGE / ERROR_MESSAGE. CHECKPOINT / TASK_NOTIFICATION neither
- * confirm nor cancel (they can follow a real final while the turn is done).
+ * Continuation records cancel a held candidate: a PLANNER_RESPONSE whose
+ * tool_calls include any FOREGROUND tool, a GENERIC tool-output line, or a
+ * SYSTEM_MESSAGE / ERROR_MESSAGE. A PLANNER_RESPONSE whose tool_calls are all
+ * task launch/poll tools (manage_task/schedule) neither confirms nor cancels.
+ * CHECKPOINT / TASK_NOTIFICATION neither confirm nor cancel (they can follow a
+ * real final while the turn is done).
  *
  * Other accepted gaps:
  *   - An EMPTY content/no-tool_calls PLANNER_RESPONSE precedes a
@@ -162,6 +169,23 @@ function cloneState(state: AntigravityTranscriptState | undefined): AntigravityT
   };
 }
 
+/** Tool calls that are part of the background-task mechanism itself —
+ *  launching a task (`manage_task`) or polling/scheduling (`schedule`).
+ *  Observed logs call BOTH of these synchronously too (their GENERIC result is
+ *  DONE while polling status), so a name never SETS the pending flag by itself
+ *  (only a GENERIC RUNNING does). Their role here is narrower: once a
+ *  GENERIC RUNNING has latched hasPendingTask, an intervening call to one of
+ *  these tools must NOT clear it — the wait it is part of is still in flight.
+ *  Empirically the RUNNING record and these calls are written out of
+ *  step_index order, so clearing on every PLANNER tool_call dropped the flag
+ *  for the majority of real build/review waits (63%). */
+const TASK_POLL_TOOL_NAMES = new Set(['manage_task', 'schedule']);
+
+function isTaskPollToolCall(toolCall: any): boolean {
+  const name = toolCall?.name ?? toolCall?.function?.name;
+  return typeof name === 'string' && TASK_POLL_TOOL_NAMES.has(name);
+}
+
 /** Fold one parsed record into the drain: push confirmed events, hold/cancel
  *  the provisional terminal, track outstanding background tasks. Returns the
  *  updated state. */
@@ -195,12 +219,19 @@ function foldRecord(
 
   if (type === 'PLANNER_RESPONSE') {
     if (Array.isArray(obj.tool_calls) && obj.tool_calls.length > 0) {
-      // The planner is acting (foreground or synchronously polling a
-      // background task's status): the background WAIT is over as far as the
-      // transcript proves, so drop any held candidate and clear the pending
-      // flag. The definitive "task launched in the background" signal is the
-      // following GENERIC RUNNING record, which re-latches — tool names alone
-      // are not reliable (manage_task is also called synchronously).
+      // Provenance decides whether the wait is over:
+      //  - EVERY call is a task launch/poll tool → the background-wait
+      //    mechanism is still operating; this neither confirms nor cancels.
+      //    Keep BOTH a held candidate and the pending flag intact (the RUNNING
+      //    record and these calls are observed out of step order).
+      //  - ANY call is an ordinary FOREGROUND tool (run_command/read/edit/…)
+      //    → the model has moved on with a real tool after the wait: hard
+      //    evidence the outstanding wait ended. Drop the candidate and clear
+      //    pending. This is what lets a turn that launched a background task
+      //    and then wrapped up on its own (NO completion SYSTEM_MESSAGE, e.g.
+      //    session 098f4ab3's 491-char release summary) still emit its real
+      //    final instead of latching forever.
+      if (obj.tool_calls.every(isTaskPollToolCall)) return state;
       return {};
     }
     const text = typeof obj.content === 'string' ? obj.content : '';

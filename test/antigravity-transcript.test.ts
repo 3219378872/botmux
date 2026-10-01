@@ -287,6 +287,82 @@ describe('drainAntigravityTranscript', () => {
     expect(r.events.map(e => e.kind)).toEqual(['assistant_final']);
   });
 
+  it('keeps the pending flag across an OUT-OF-ORDER task poll tool_call (real build/review wait shape)', () => {
+    // Real logs write the GENERIC RUNNING record and the launch/poll
+    // PLANNER_RESPONSE out of step_index order: the RUNNING line lands BEFORE
+    // the manage_task/schedule tool_call line even though its step is higher.
+    // Clearing pending on every PLANNER tool_call dropped the flag right after
+    // it was latched, so the subsequent "Waiting for build" final was flushable
+    // ~63% of the time (90 real turns). Only FOREGROUND tools may clear it.
+    writeFileSync(path, [
+      line(userRecord('跑下构建')),
+      line(BG_RUNNING_RECORD),                                   // physical: RUNNING first
+      line(plannerStep({ toolCalls: [toolCall('schedule')], step: 1 })), // then the poll call
+      line(plannerStep({ content: 'Waiting for `bun run build` to finish.', step: 2, createdAt: '2026-09-29T03:00:11Z' })),
+    ].join(''));
+    let r = drainAntigravityTranscript(path, 0);
+    expect(r.events.map(e => e.kind)).toEqual(['user']);
+    expect(r.state.provisionalFinal?.text).toContain('bun run build');
+    expect(r.state.hasPendingTask).toBe(true);
+    // A neutral CHECKPOINT arriving later grows the file but must not clear
+    // the flag — exercises the trailing (file-grew) flush branch, which must
+    // refuse just like the unchanged-offset branch.
+    appendFileSync(path, line({ step_index: 200, source: 'MODEL', type: 'CHECKPOINT', status: 'DONE' }));
+    r = drainAntigravityTranscript(path, r.newOffset, r.state, { flushTrailingFinal: true });
+    expect(r.events).toHaveLength(0);
+    expect(r.state.hasPendingTask).toBe(true);
+    expect(r.state.provisionalFinal?.text).toContain('bun run build');
+  });
+
+  it('a schedule/manage_task poll call without a prior RUNNING does NOT latch (name alone never sets pending)', () => {
+    writeFileSync(path, [
+      line(userRecord('q')),
+      line(plannerStep({ toolCalls: [toolCall('manage_task')], step: 1 })),
+      line(BG_DONE_RECORD),
+      line(plannerStep({ content: '同步查完，没有在跑的任务，结论如下。', step: 2, createdAt: '2026-09-29T03:00:20Z' })),
+    ].join(''));
+    const r = drainAntigravityTranscript(path, 0);
+    expect(r.state.hasPendingTask).toBeUndefined();
+    expect(r.state.provisionalFinal?.text).toContain('结论如下');
+    const flushed = drainAntigravityTranscript(path, r.newOffset, r.state, { flushTrailingFinal: true });
+    expect(flushed.events.map(e => e.kind)).toEqual(['assistant_final']);
+  });
+
+  it('releases the real final when the planner wraps up with foreground tools and NO wake-up SYSTEM_MESSAGE (session 098f4ab3 shape)', () => {
+    // The failure mode of "PLANNER tool_calls never clears pending": a task
+    // goes RUNNING, the model polls with view_file/manage_task, then produces a
+    // substantial final with no completion SYSTEM_MESSAGE and no next user
+    // turn. A foreground tool (view_file) must clear pending; later poll-only
+    // calls must not re-latch (no new RUNNING), so the real final flushes.
+    writeFileSync(path, [
+      line(userRecord('做个发版评估')),
+      line(BG_RUNNING_RECORD),
+      line(plannerStep({ content: 'No tools called; waiting for task notification.', toolCalls: [toolCall('view_file')], step: 46, createdAt: '2026-09-29T03:00:12Z' })),
+      line(BG_DONE_RECORD),
+      line(plannerStep({ toolCalls: [toolCall('manage_task')], step: 48, createdAt: '2026-09-29T03:00:14Z' })),
+      line(plannerStep({ content: 'No tools called; waiting for task notification.', toolCalls: [toolCall('view_file')], step: 50, createdAt: '2026-09-29T03:00:16Z' })),
+      line(plannerStep({ content: '已完成发版评估：最新 Tag v3.30.0，待发版 2 个，建议 v3.31.0。', step: 54, createdAt: '2026-09-29T03:01:40Z' })),
+    ].join(''));
+    const r = drainAntigravityTranscript(path, 0);
+    expect(r.events.map(e => e.kind)).toEqual(['user']);
+    expect(r.state.hasPendingTask).toBeUndefined();
+    expect(r.state.provisionalFinal?.text).toContain('v3.31.0');
+    const flushed = drainAntigravityTranscript(path, r.newOffset, r.state, { flushTrailingFinal: true });
+    expect(flushed.events.map(e => `${e.kind}:${e.text}`)).toEqual(['assistant_final:已完成发版评估：最新 Tag v3.30.0，待发版 2 个，建议 v3.31.0。']);
+  });
+
+  it('a mixed tool_calls batch (poll tool + any foreground tool) clears pending like a foreground tool', () => {
+    writeFileSync(path, [
+      line(userRecord('q')),
+      line(BG_RUNNING_RECORD),
+      line(plannerStep({ toolCalls: [toolCall('manage_task'), toolCall('run_command')], step: 3, createdAt: '2026-09-29T03:00:12Z' })),
+      line(plannerStep({ content: '前台命令拿到结果，收尾答复。', step: 4, createdAt: '2026-09-29T03:00:20Z' })),
+    ].join(''));
+    const r = drainAntigravityTranscript(path, 0);
+    expect(r.state.hasPendingTask).toBeUndefined();
+    expect(r.state.provisionalFinal?.text).toContain('收尾答复');
+  });
+
   it('a SYSTEM_MESSAGE alone cancels a candidate and clears the pending flag (no following tools)', () => {
     writeFileSync(path, [
       line(userRecord('q')),

@@ -117,4 +117,20 @@ describe('Codex worker structured-bridge wiring', () => {
     const fn = workerSource.slice(fnStart, fnEnd);
     expect(fn).toContain('if (codexBridgeFallbackActive()) codexBridgeNotifyCliSessionId(cid);');
   });
+
+  it('spawnCli re-checks zero-prompt capability with the RESOLVED sandbox mode (env BOTMUX_SANDBOX=scratch is not on cfg)', () => {
+    // The capability gate at config/command time cannot see the machine-wide
+    // BOTMUX_SANDBOX switch (it is never materialised into cfg). spawnCli
+    // resolves the real mode via resolveSandboxMode → sandboxMode; it must feed
+    // that resolved value back into supportsZeroPromptInjection so a
+    // zero-prompt cursor/antigravity under the scratch COW overlay throws
+    // instead of silently dropping every reply.
+    const anchor = workerSource.indexOf('const scratchRequested = sandboxMode === ');
+    expect(anchor).toBeGreaterThan(0);
+    // The re-check lives after the resolved mode is known in spawnCli.
+    const region = workerSource.slice(anchor, anchor + 2000);
+    expect(region).toContain("cfg.promptInjection === 'none' && !supportsZeroPromptInjection(cfg.cliId, {");
+    expect(region).toContain('sandbox: sandboxMode');
+    expect(region).toContain('backendType: effectiveBackendType');
+  });
 });

@@ -5,20 +5,6 @@ import type { DaemonSession } from './types.js';
 
 export type PromptInjection = 'default' | 'none';
 
-/** Whether a spawn runs in ANY local file sandbox (legacy bwrap oncall OR the
- *  full-root scratch COW), across the config flag, read isolation and the
- *  machine-wide BOTMUX_SANDBOX switch. Normalises the tri-state sandbox value
- *  master introduced ('off' | 'oncall' | 'scratch'). */
-export function isSandboxRequested(opts?: {
-  sandbox?: boolean | 'off' | 'oncall' | 'scratch';
-  readIsolation?: boolean;
-}): boolean {
-  if (opts?.readIsolation) return true;
-  if (opts?.sandbox === true || opts?.sandbox === 'oncall' || opts?.sandbox === 'scratch') return true;
-  if (opts?.sandbox !== undefined) return false;
- return process.env.BOTMUX_SANDBOX === '1';
-}
-
 export type ZeroPromptSandboxValue = boolean | 'off' | 'oncall' | 'scratch';
 
 /** Whether a spawn runs in the full-root COW scratch sandbox (as opposed to
@@ -52,7 +38,21 @@ export function isScratchSandbox(opts?: {
  * now: it bind-mounts a merged overlay as / and ignores authPaths, so their
  * transcripts land in the upper tree the host-side structured bridge does not
  * resolve yet (the existing structured bridges codex/grok have the same open
- * gap). Fail loudly here rather than silently dropping every reply. */
+ * gap). Fail loudly here rather than silently dropping every reply.
+ *
+ * This capability predicate only sees the CONFIG/session value, so the
+ * machine-wide `BOTMUX_SANDBOX=scratch` switch (which is not materialised into
+ * cfg) is enforced separately by an authoritative throw in spawnCli after it
+ * resolves the real mode via resolveSandboxMode.
+ *
+ * Backend: antigravity additionally rejects the `zmx` backend. Its held
+ * provisional final is released only by the quiet-tick viewport gate, and
+ * screen evidence is deliberately non-authoritative under zmx
+ * (backendScreenEvidenceIsAuthoritativeForMutation) — the final would then be
+ * held until the next user turn at best. cursor is unaffected (it emits the
+ * final immediately rather than through that gate). */
+const ZERO_PROMPT_LOCAL_BACKENDS = ['pty', 'tmux', 'herdr', 'zellij', 'zmx'] as const;
+
 export function supportsZeroPromptInjection(cliId: string | undefined, opts?: {
   backendType?: string; codexRpcInput?: boolean;
   sandbox?: ZeroPromptSandboxValue;
@@ -61,10 +61,14 @@ export function supportsZeroPromptInjection(cliId: string | undefined, opts?: {
   const localTranscript = supportsTranscriptReplyDelivery(cliId)
     || supportsZeroPromptStructuredBridge(cliId);
   if (!localTranscript) return false;
-  if (opts?.backendType && !['pty', 'tmux', 'herdr', 'zellij', 'zmx'].includes(opts.backendType)) {
+  if (opts?.backendType
+    && !ZERO_PROMPT_LOCAL_BACKENDS.includes(opts.backendType as typeof ZERO_PROMPT_LOCAL_BACKENDS[number])) {
     return false;
   }
   if ((cliId === 'cursor' || cliId === 'antigravity') && isScratchSandbox(opts)) {
+    return false;
+  }
+  if (cliId === 'antigravity' && opts?.backendType === 'zmx') {
     return false;
   }
   return true;

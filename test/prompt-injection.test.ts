@@ -9,7 +9,7 @@ vi.mock('../src/bot-registry.js', () => ({
   getBot: vi.fn(() => { throw new Error('not configured'); }),
 }));
 
-import { supportsZeroPromptInjection, sessionPromptInjection, isSandboxRequested } from '../src/core/prompt-injection.js';
+import { supportsZeroPromptInjection, sessionPromptInjection, isScratchSandbox } from '../src/core/prompt-injection.js';
 
 describe('supportsZeroPromptInjection', () => {
   it('supports the classic transcript CLIs', () => {
@@ -35,6 +35,26 @@ describe('supportsZeroPromptInjection', () => {
     expect(supportsZeroPromptInjection('cursor', { backendType: 'riff' })).toBe(false);
     expect(supportsZeroPromptInjection('antigravity', { backendType: 'mojo' })).toBe(false);
     expect(supportsZeroPromptInjection('codex', { backendType: 'riff' })).toBe(false);
+  });
+
+  it('rejects antigravity on zmx (quiet-final viewport gate is non-authoritative there) but keeps cursor (immediate final)', () => {
+    expect(supportsZeroPromptInjection('antigravity', { backendType: 'zmx' })).toBe(false);
+    expect(supportsZeroPromptInjection('antigravity', { backendType: 'zmx', sandbox: false })).toBe(false);
+    // cursor emits the assistant_final immediately and does not route through
+    // the antigravity quiet-tick viewport gate.
+    expect(supportsZeroPromptInjection('cursor', { backendType: 'zmx' })).toBe(true);
+    // Other local backends remain fine for antigravity.
+    expect(supportsZeroPromptInjection('antigravity', { backendType: 'zellij' })).toBe(true);
+    expect(supportsZeroPromptInjection('antigravity', { backendType: 'tmux' })).toBe(true);
+  });
+
+  it('isScratchSandbox only recognises the tri-state scratch value', () => {
+    expect(isScratchSandbox({ sandbox: 'scratch' })).toBe(true);
+    expect(isScratchSandbox({ sandbox: 'oncall' })).toBe(false);
+    expect(isScratchSandbox({ sandbox: true })).toBe(false);
+    expect(isScratchSandbox({ sandbox: false })).toBe(false);
+    expect(isScratchSandbox({ readIsolation: true })).toBe(false);
+    expect(isScratchSandbox({})).toBe(false);
   });
 
   it('allows cursor/antigravity under the oncall bwrap sandbox (transcript dirs are directory-bound to the host fs)', () => {
@@ -63,32 +83,5 @@ describe('sessionPromptInjection', () => {
     expect(sessionPromptInjection({ session: { promptInjection: 'none' }, initConfig: { promptInjection: 'default' } } as any)).toBe('none');
     expect(sessionPromptInjection({ session: {}, initConfig: { promptInjection: 'none' } } as any)).toBe('none');
     expect(sessionPromptInjection({ session: {}, initConfig: {} } as any)).toBe('default');
-  });
-});
-
-describe('isSandboxRequested', () => {
-  const prev = process.env.BOTMUX_SANDBOX;
-  const reset = () => {
-    if (prev === undefined) delete process.env.BOTMUX_SANDBOX;
-    else process.env.BOTMUX_SANDBOX = prev;
-  };
-  it('covers all enablement paths (incl. tri-state scratch/oncall) and defaults to false', () => {
-    delete process.env.BOTMUX_SANDBOX;
-    expect(isSandboxRequested()).toBe(false);
-    expect(isSandboxRequested({ sandbox: true })).toBe(true);
-    expect(isSandboxRequested({ sandbox: 'oncall' })).toBe(true);
-    expect(isSandboxRequested({ sandbox: 'scratch' })).toBe(true);
-    expect(isSandboxRequested({ sandbox: 'off' })).toBe(false);
-    expect(isSandboxRequested({ sandbox: false })).toBe(false);
-    expect(isSandboxRequested({ readIsolation: true })).toBe(true);
-    expect(isSandboxRequested({})).toBe(false);
-    process.env.BOTMUX_SANDBOX = '1';
-    expect(isSandboxRequested()).toBe(true);
-    // An explicit value takes precedence over the env switch; only an
-    // unspecified field falls through to it.
-    expect(isSandboxRequested({ sandbox: false, readIsolation: false })).toBe(false);
-    expect(isSandboxRequested({ sandbox: 'off' })).toBe(false);
-    expect(isSandboxRequested({})).toBe(true);
-    reset();
   });
 });
