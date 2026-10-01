@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inheritBotEnv } from '../src/core/env-policy.js';
-import { spawnTsScript } from './helpers/ts-runner.js';
+import { spawnNodeTsScript } from './helpers/ts-runner.js';
 
 let realTmux: string | undefined;
 try { realTmux = execFileSync('which', ['tmux'], { encoding: 'utf8' }).trim(); } catch { /* optional native tool */ }
@@ -39,18 +39,21 @@ console.log('Ready >'); setTimeout(() => {}, 30000);
       execFileSync(realTmux!, ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', 'bmx-11111111', '/bin/sleep', '60'], { env, stdio: 'ignore' });
       oldPid = Number(execFileSync(realTmux!, ['-S', socket, 'display-message', '-p', '-t', 'bmx-11111111', '#{pane_pid}'], { encoding: 'utf8' }));
     }
-    const worker = spawnTsScript('src/worker.ts', [], { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    const worker = spawnNodeTsScript('src/worker.ts', [], { env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+    let diagnostics = '';
+    worker.stdout?.on('data', data => diagnostics += String(data));
+    worker.stderr?.on('data', data => diagnostics += String(data));
     try {
       worker.send({ type: 'init', sessionId: '11111111-1111-4111-8111-111111111111', chatId: 'virtual_probe', rootMessageId: 'probe',
         workingDir: dir, cliId, cliPathOverride: script, backendType: restore ? 'tmux' : 'pty', prompt: '',
         apiOnly: true, larkAppId: 'app_probe', larkAppSecret: '', ownerOpenId: 'ou_owner',
         envPolicy: { mode: 'strict', inherit: ['HTTPS_PROXY'] }, env: { MODEL_AUTH: 'bot-sentinel' },
         loadedBotsConfigPath: bots, loadedBotsConfigProvenance: 'loaded', promptInjection: 'none' });
-      await vi.waitFor(() => expect(existsSync(report)).toBe(true), { timeout: 20000 });
+      await vi.waitFor(() => expect(existsSync(report), diagnostics).toBe(true), { timeout: 20000 });
       for (const [key, ok] of Object.entries(JSON.parse(readFileSync(report, 'utf8')))) expect(ok, key).toBe(true);
       if (restore) {
         expect(() => process.kill(oldPid!, 0)).toThrow();
-        expect(existsSync(join(dir, 'data/sessions/11111111-1111-4111-8111-111111111111.env-policy'))).toBe(true);
+        await vi.waitFor(() => expect(existsSync(join(dir, 'data/sessions/11111111-1111-4111-8111-111111111111.env-policy'))).toBe(true));
       }
     } finally {
       if (worker.connected) worker.send({ type: 'close' });

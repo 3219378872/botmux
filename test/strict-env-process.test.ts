@@ -5,15 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildBotWorkerEnv, buildSessionChildEnv, botInjectedEnv } from '../src/core/env-policy.js';
 import { strictPaneCommand } from '../src/adapters/backend/strict-env.js';
-import { PtyBackend } from '../src/adapters/backend/pty-backend.js';
-import { TmuxBackend } from '../src/adapters/backend/tmux-backend.js';
-import { TmuxPipeBackend } from '../src/adapters/backend/tmux-pipe-backend.js';
 import { buildLayoutString } from '../src/adapters/backend/zellij-backend.js';
 import { buildZmxLaunchFiles } from '../src/adapters/backend/zmx-backend.js';
 import { type SpawnOpts } from '../src/adapters/backend/types.js';
-import { tsRunnerPrefix, spawnTsEval } from './helpers/ts-runner.js';
+import { nodeTsRunnerPrefix, spawnTsEval, spawnNodeTsScript } from './helpers/ts-runner.js';
 
-const runner = tsRunnerPrefix();
+// Native PTY and the fake CLI are Node fixtures even under the Bun runner.
+// See nodeTsRunnerPrefix: Bun-native PTY fixtures otherwise exit with SIGHUP.
+const runner = nodeTsRunnerPrefix();
 const policy = { mode: 'strict' as const, inherit: ['GRANTED_TOOLCHAIN'] };
 const probeSource = `const fs = require('node:fs'); const e = process.env;
 fs.writeFileSync(process.argv[2], JSON.stringify({
@@ -46,13 +45,27 @@ function prepare() {
   return { dir, script };
 }
 
+function launchBackend(kind: string, script: string, dir: string, opts: SpawnOpts, session = 'bmx-strict-probe') {
+  const options = join(dir, 'options.json');
+  writeFileSync(options, JSON.stringify(opts), { mode: 0o600 });
+  return spawnNodeTsScript('test/fixtures/strict-env-backend-probe.ts',
+    [kind, runner.command, script, join(dir, 'report'), options, session], { env: opts.env, stdio: 'ignore' });
+}
+async function stopBackend(child: ReturnType<typeof spawnNodeTsScript>) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill('SIGTERM');
+  await new Promise<void>(resolve => {
+    const timer = setTimeout(() => { child.kill('SIGKILL'); resolve(); }, 2000);
+    child.once('exit', () => { clearTimeout(timer); resolve(); });
+  });
+}
 describe('strict environment real process probes', () => {
   it('PTY child receives only approved bot runtime/auth and trusted identity', async () => {
-    const { dir, script } = prepare(); const backend = new PtyBackend();
+    const { dir, script } = prepare(); let child: ReturnType<typeof spawnNodeTsScript> | undefined;
     try {
-      backend.spawn(runner.command, [script, join(dir, 'report')], optsFor(dir));
+      child = launchBackend('pty', script, dir, optsFor(dir));
       await report(join(dir, 'report'));
-    } finally { backend.kill(); rmSync(dir, { recursive: true, force: true }); }
+    } finally { if (child) await stopBackend(child); rmSync(dir, { recursive: true, force: true }); }
   });
   it('the zellij layout executes the same empty-environment argv without a profile shell', async () => {
     const { dir, script } = prepare(); let child: ReturnType<typeof spawnTsEval> | undefined;
@@ -93,7 +106,7 @@ describe('strict environment real process probes', () => {
   try { realTmux = execFileSync('which', ['tmux'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* optional native tool */ }
   it.skipIf(!realTmux).each(['tmux', 'tmux-pipe'] as const)('%s excludes poisoned shared-server env, skips profile and isolates explicit bot credentials', async kind => {
     const { dir, script } = prepare(); const socket = join(dir, 'socket'); const binDir = join(dir, 'bin');
-    const session = 'bmx-strict-probe'; let backend: TmuxBackend | TmuxPipeBackend | undefined;
+    const session = 'bmx-strict-probe'; let child: ReturnType<typeof spawnNodeTsScript> | undefined;
     try {
       mkdirSync(binDir);
       // Every backend/control command is redirected to THIS isolated socket.
@@ -102,8 +115,7 @@ describe('strict environment real process probes', () => {
       execFileSync(realTmux!, ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', 'poison', '/bin/sleep', '60'], { env: launchEnv, stdio: 'ignore' });
       vi.stubEnv('PATH', `${binDir}:${process.env.PATH}`);
       const opts = optsFor(dir); opts.env.PATH = `${binDir}:${opts.env.PATH}`;
-      backend = kind === 'tmux' ? new TmuxBackend(session) : new TmuxPipeBackend(session, { createSession: true, ownsSession: true });
-      backend.spawn(runner.command, [script, join(dir, 'report')], opts);
+      child = launchBackend(kind, script, dir, opts, session);
       await report(join(dir, 'report'));
       // Let tmux's delayed per-session setup finish while PATH still points
       // only at the isolated test socket.
@@ -114,7 +126,7 @@ describe('strict environment real process probes', () => {
       expect(globals.includes('GRANTED_TOOLCHAIN=')).toBe(false);
       expect(globals.includes('UNLISTED_CLOUD_CREDENTIAL=')).toBe(true);
     } finally {
-      backend?.kill();
+      if (child) await stopBackend(child);
       try { execFileSync(realTmux!, ['-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* already exited */ }
       vi.unstubAllEnvs(); rmSync(dir, { recursive: true, force: true });
     }
