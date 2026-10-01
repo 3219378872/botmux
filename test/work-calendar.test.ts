@@ -6,7 +6,7 @@ import { config } from '../src/config.js';
 import {
   checkTaskCalendar, checkWorkCalendar, normalizeCalendarBinding, parseWorkCalendar,
   previewTaskCalendar, workCalendarPath,
-  CN_CALENDAR_PROFILE,
+  BUILTIN_WORK_CALENDARS,
 } from '../src/services/work-calendar.js';
 import type { ScheduledTask } from '../src/types.js';
 import { readScheduleUpdate } from '../src/cli/schedule-update.js';
@@ -85,6 +85,17 @@ describe('calendar loading, isolation and next eligible trigger', () => {
     expect(checkTaskCalendar(task, app, new Date('2028-01-03T01:00:00Z')).status).toBe('working');
     expect(checkTaskCalendar({ ...task, calendar: 'broken' })).toMatchObject({ reason: 'calendar_invalid' });
   });
+  it('treats user calendars as independent entities without a country-specific default', () => {
+    writeFileSync(workCalendarPath(app), JSON.stringify({ version: 1, calendars: {
+      demo: definition,
+      'company-weekdays': { ...definition, timeZone: 'UTC', restDates: [], workDates: [] },
+    } }));
+    const instant = new Date('2028-01-08T01:00:00Z');
+    expect(checkTaskCalendar(task, app, instant)).toMatchObject({ calendar: 'demo', status: 'working', reason: 'work_date' });
+    expect(checkTaskCalendar({ ...task, calendar: 'company-weekdays' }, app, instant))
+      .toMatchObject({ calendar: 'company-weekdays', status: 'rest', reason: 'rest_week', timeZone: 'UTC' });
+    expect(checkTaskCalendar({ ...task, calendar: 'cn' }, app, instant)).toMatchObject({ reason: 'calendar_out_of_coverage' });
+  });
   it('rejects a stored once binding at runtime', () => {
     expect(checkTaskCalendar({ ...task, parsed: { kind: 'once', runAt: '2028-01-04T01:00:00Z', display: 'once' } })).toMatchObject({ reason: 'calendar_once_unsupported' });
   });
@@ -118,7 +129,7 @@ describe('mainland China official 2026 snapshot', () => {
       ['2026-06-19', '2026-06-21'], ['2026-09-25', '2026-09-27'], ['2026-10-01', '2026-10-07'],
     ];
     const makeup = new Set(['2026-01-04', '2026-02-14', '2026-02-28', '2026-05-09', '2026-09-20', '2026-10-10']);
-    const calendar = parseWorkCalendar(CN_CALENDAR_PROFILE.calendar);
+    const calendar = parseWorkCalendar(BUILTIN_WORK_CALENDARS.cn.calendar);
     expect(calendar.restDates).toHaveLength(33);
     expect(calendar.workDates).toHaveLength(6);
     for (let day = new Date('2026-01-01T01:00:00Z'); day.getUTCFullYear() === 2026; day = new Date(+day + 86_400_000)) {
@@ -127,7 +138,7 @@ describe('mainland China official 2026 snapshot', () => {
       const working = makeup.has(date) || (!rest && day.getUTCDay() >= 1 && day.getUTCDay() <= 5);
       expect(checkTaskCalendar(cnTask, app, day), date).toMatchObject({ date, timeZone: 'Asia/Shanghai', status: working ? 'working' : 'rest' });
     }
-    expect(CN_CALENDAR_PROFILE).toMatchObject({ region: 'CN', dataVersion: '2026.1', source: {
+    expect(BUILTIN_WORK_CALENDARS.cn).toMatchObject({ region: 'CN', dataVersion: '2026.1', source: {
       authority: '国务院办公厅', documentNo: '国办发明电〔2025〕7号', publishedAt: '2025-11-04',
     } });
   });

@@ -7635,11 +7635,12 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
   }
 
   if (sub === 'calendars') {
-    const { CN_CALENDAR_PROFILE, readWorkCalendarDefinitions, parseWorkCalendar } = await import('./services/work-calendar.js');
+    const { BUILTIN_WORK_CALENDARS, readWorkCalendarDefinitions, parseWorkCalendar } = await import('./services/work-calendar.js');
     const appId = scheduleStore.getScheduleScope();
     if (!appId) throw new Error('calendar_scope_missing');
-    const { calendar: cnCalendar, ...cnProvenance } = CN_CALENDAR_PROFILE;
-    console.log(JSON.stringify({ name: 'cn', kind: 'builtin', ...cnProvenance, ...parseWorkCalendar(cnCalendar) }));
+    for (const [name, { calendar, ...metadata }] of Object.entries(BUILTIN_WORK_CALENDARS)) {
+      console.log(JSON.stringify({ name, kind: 'builtin', ...metadata, ...parseWorkCalendar(calendar) }));
+    }
     let definitions: Record<string, unknown>;
     try { definitions = readWorkCalendarDefinitions(appId); }
     catch (error) {
@@ -7647,7 +7648,7 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
       throw error;
     }
     for (const [name, value] of Object.entries(definitions)) {
-      if (name === 'cn') {
+      if (Object.hasOwn(BUILTIN_WORK_CALENDARS, name)) {
         console.log(JSON.stringify({ name, kind: 'local', error: 'reserved_builtin_calendar' }));
         continue;
       }

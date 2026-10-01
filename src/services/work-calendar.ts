@@ -1,4 +1,4 @@
-/** Bundled CN calendar and per-bot extension profiles. No runtime network or inferred holidays. */
+/** Independent named calendars, bundled or user-defined. No runtime network or inferred holidays. */
 import { readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Cron } from 'croner';
@@ -7,10 +7,8 @@ import { botHomePath } from '../adapters/cli/read-isolation.js';
 import { config } from '../config.js';
 import { scheduleTimeZone } from '../utils/timezone.js';
 import type { ScheduledTask } from '../types.js';
-import cn2026 from './work-calendars/cn-2026.json' with { type: 'json' };
-
-/** Only supported statutory region in this release; provenance travels with the versioned snapshot. */
-export const CN_CALENDAR_PROFILE = cn2026;
+import { BUILTIN_WORK_CALENDARS } from './work-calendars/catalog.js';
+export { BUILTIN_WORK_CALENDARS } from './work-calendars/catalog.js';
 
 const NAME = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 const MAX_BYTES = 1024 * 1024;
@@ -84,9 +82,10 @@ export function readWorkCalendarDefinitions(appId: string, dataDir = config.sess
 function resolveCalendar(name: unknown, appId: string | undefined): WorkCalendar {
   if (!appId) throw new Error('calendar_scope_missing');
   if (!normalizeCalendarBinding(name)) throw new Error('calendar_invalid');
-  // Reserved built-in name. Bot-local files cannot silently replace national data.
-  // Static import works in Node dist and Bun standalone binaries alike.
-  if (name === 'cn') return parseWorkCalendar(CN_CALENDAR_PROFILE.calendar);
+  // Built-in IDs are reserved; local entities use their own IDs and the same rule schema.
+  if (Object.hasOwn(BUILTIN_WORK_CALENDARS, name as string)) {
+    return parseWorkCalendar(BUILTIN_WORK_CALENDARS[name as string].calendar);
+  }
   let definitions: Record<string, unknown>;
   try { definitions = readWorkCalendarDefinitions(appId); }
   catch (error) {

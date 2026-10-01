@@ -52,7 +52,7 @@ const EMBED_MECHANISMS = [
   {
     id: 'cn-work-calendar-json-import',
     covers: (rel) => rel === 'services/work-calendars/cn-2026.json',
-    proof: 'services/work-calendar.ts statically imports with { type: "json" }; the calendar module compile smoke verifies CN rest/makeup/coverage without an on-disk JSON file',
+    proof: 'services/work-calendars/catalog.ts statically imports with { type: "json" }; the calendar module compile smoke verifies CN rest/makeup/coverage without an on-disk JSON file',
   },
   {
     id: 'dashboard-embed-preamble',
