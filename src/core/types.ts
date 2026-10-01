@@ -89,9 +89,10 @@ export interface DaemonSession {
   cliReadyGeneration?: number;
   /** runtime 级联定序器（daemon 的 runPassthroughCascade）在飞：同 anchor 后到的普通消息 /
    *  单条透传排进 `cascadeDeferred`，定序器收尾时按到达顺序重入 handleThreadReply；第二条级联
-   *  fail closed。In-memory only. */
+   *  fail closed。`parsed` / `resources` 是首过 preamble（parse、merge_forward 展开、语音转写）
+   *  之后的快照，重入用它代替重新 parse。In-memory only. */
   cascadeInFlight?: boolean;
-  cascadeDeferred?: Array<{ data: unknown; ctx: unknown }>;
+  cascadeDeferred?: Array<{ data: unknown; ctx: unknown; parsed?: unknown; resources?: unknown }>;
   workerPort: number | null;     // HTTP port for xterm.js
   workerToken: string | null;    // write token for xterm.js
   /** Independent read-only xterm capability. Optional for hydrated/legacy

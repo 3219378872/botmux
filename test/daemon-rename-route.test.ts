@@ -3919,6 +3919,120 @@ describe('runtime passthrough cascade (PR-3)', () => {
     expect(ds.cascadeInFlight).toBe(false);
   });
 
+  it('级联在飞时推迟的普通消息：放开后送到 CLI，thread.reply 只发一次', async () => {
+    const learn = vi.spyOn(await import('../src/im/lark/identity-cache.js'), 'learnFromMentions');
+    const hook = vi.spyOn(await import('../src/services/hook-runner.js'), 'emitHookEvent');
+    const threadReplies = (id: string) => hook.mock.calls.filter(
+      call => call[0] === 'thread.reply' && (call[1] as { messageId?: string } | undefined)?.messageId === id,
+    );
+    try {
+      const { ds, raws } = seedLiveThreadSession('om_root_casc_defer');
+      const sent = () => (ds.worker as any).send.mock.calls.map((c: any[]) => c[0]);
+      await handleThreadReply(
+        makeEventData('om_casc_defer', '/compact 只留登录上下文\n/clear', 'om_root_casc_defer'),
+        makeCtx('om_root_casc_defer', 'om_casc_defer'),
+      );
+      await tick(15);
+      ds.lastScreenStatus = 'working';
+      const later = '稍后这条普通消息';
+      await handleThreadReply(
+        makeEventData('om_casc_defer_msg', later, 'om_root_casc_defer'),
+        makeCtx('om_root_casc_defer', 'om_casc_defer_msg'),
+      );
+      expect(JSON.stringify(sent())).not.toContain(later);
+      expect(threadReplies('om_casc_defer_msg')).toHaveLength(1);
+      expect(learn).toHaveBeenCalledTimes(2);
+      ds.cliReadyGeneration = 2;
+      ds.lastScreenStatus = 'idle';
+      await tick(160);
+      expect(raws().map((m: any) => m.content)).toEqual(['/compact 只留登录上下文', '/clear']);
+      expect(JSON.stringify(sent())).toContain(later);
+      expect(threadReplies('om_casc_defer_msg')).toHaveLength(1);
+      expect(learn).toHaveBeenCalledTimes(2);
+      expect(ds.cascadeInFlight).toBe(false);
+    } finally {
+      learn.mockRestore();
+      hook.mockRestore();
+    }
+  });
+
+  it('级联在飞时推迟的语音：只转写一次，放开后 CLI 拿到转写文本', async () => {
+    const client = await import('../src/im/lark/client.js');
+    const voice = await import('../src/services/voice/index.js');
+    const asr = await import('../src/services/voice/asr.js');
+    const download = vi.spyOn(client, 'downloadMessageResource').mockResolvedValue(undefined);
+    const asrCfg = vi.spyOn(voice, 'resolveAsrConfig').mockReturnValue({
+      baseUrl: 'http://asr.example/v1',
+      model: 'whisper-1',
+      timeoutMs: 1000,
+    });
+    const transcribe = vi.spyOn(asr, 'transcribeAudioFile').mockResolvedValue('你好世界');
+    try {
+      const { ds, raws } = seedLiveThreadSession('om_root_casc_audio');
+      const sent = () => (ds.worker as any).send.mock.calls.map((c: any[]) => c[0]);
+      await handleThreadReply(
+        makeEventData('om_casc_audio_cmd', '/compact 只留登录上下文\n/clear', 'om_root_casc_audio'),
+        makeCtx('om_root_casc_audio', 'om_casc_audio_cmd'),
+      );
+      await tick(15);
+      ds.lastScreenStatus = 'working';
+      const audio = makeEventData('om_casc_audio', '', 'om_root_casc_audio');
+      audio.message.message_type = 'audio';
+      audio.message.content = JSON.stringify({ file_key: 'file_voice_1' });
+      await handleThreadReply(audio, makeCtx('om_root_casc_audio', 'om_casc_audio'));
+      expect(transcribe).toHaveBeenCalledTimes(1);
+      expect(download).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(sent())).not.toContain('你好世界');
+      ds.cliReadyGeneration = 2;
+      ds.lastScreenStatus = 'idle';
+      await tick(160);
+      expect(transcribe).toHaveBeenCalledTimes(1);
+      expect(download).toHaveBeenCalledTimes(1);
+      const payload = JSON.stringify(sent());
+      expect(payload).toContain('你好世界');
+      expect(payload).not.toContain('[语音]');
+      expect(raws().map((m: any) => m.content)).toEqual(['/compact 只留登录上下文', '/clear']);
+      const transcribing = mocks.replyMessage.mock.calls.filter(call => JSON.stringify(call).includes('正在转写'));
+      expect(transcribing).toHaveLength(1);
+    } finally {
+      download.mockRestore();
+      asrCfg.mockRestore();
+      transcribe.mockRestore();
+    }
+  });
+
+  it('级联在飞时推迟的合并转发：子消息只展开一次', async () => {
+    const merge = await import('../src/im/lark/merge-forward.js');
+    const expand = vi.spyOn(merge, 'expandMergeForward').mockImplementation(async (_app, _id, parsed) => {
+      parsed.content = '转发正文：登录失败';
+      parsed.msgType = 'merge_forward_expanded';
+      return { extraResources: [{ type: 'image', key: 'img_fwd_1', name: 'img_fwd_1.jpg' }] };
+    });
+    try {
+      const { ds } = seedLiveThreadSession('om_root_casc_fwd');
+      const sent = () => (ds.worker as any).send.mock.calls.map((c: any[]) => c[0]);
+      await handleThreadReply(
+        makeEventData('om_casc_fwd_cmd', '/compact 只留登录上下文\n/clear', 'om_root_casc_fwd'),
+        makeCtx('om_root_casc_fwd', 'om_casc_fwd_cmd'),
+      );
+      await tick(15);
+      ds.lastScreenStatus = 'working';
+      const forwarded = makeEventData('om_casc_fwd', '', 'om_root_casc_fwd');
+      forwarded.message.message_type = 'merge_forward';
+      forwarded.message.content = '{}';
+      await handleThreadReply(forwarded, makeCtx('om_root_casc_fwd', 'om_casc_fwd'));
+      expect(expand).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(sent())).not.toContain('转发正文：登录失败');
+      ds.cliReadyGeneration = 2;
+      ds.lastScreenStatus = 'idle';
+      await tick(160);
+      expect(expand).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(sent())).toContain('转发正文：登录失败');
+    } finally {
+      expand.mockRestore();
+    }
+  });
+
   it('单条透传不受影响：仍然立即以真实 messageId 送出', async () => {
     const { raws } = seedLiveThreadSession('om_root_casc4');
     await handleThreadReply(

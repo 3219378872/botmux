@@ -21045,13 +21045,26 @@ async function runPassthroughCascade(args: {
     await notify(tr('daemon.cascade_failed', { done: delivered, remaining: items.length - delivered }, loc));
   } finally {
     // 定序器收尾：解除在飞标记，把等待期间到达的同话题消息按到达顺序重入。
+    // 重入带上首过 preamble 的快照，不再 parseEventMessage / 展开 merge_forward；
+    // ctx.cascadeBodyReentry 跳过 learnFromMentions 与 thread.reply。配额不走 prepared，仍重过。
     ds.cascadeInFlight = false;
     const deferred = ds.cascadeDeferred ?? [];
     ds.cascadeDeferred = undefined;
     for (const d of deferred) {
-      await handleThreadReply(d.data, d.ctx as RoutingContext);
+      await handleThreadReply(d.data, d.ctx as RoutingContext, undefined, cascadeDeferredSnapshot(d));
     }
   }
+}
+
+/** 级联推迟项在首过 preamble 之后记下的解析结果。没有快照时重入退回重新 parse。 */
+function cascadeDeferredSnapshot(
+  item: { parsed?: unknown; resources?: unknown },
+): { parsed: LarkMessage; resources: MessageResource[] } | undefined {
+  if (!item.parsed || typeof item.parsed !== 'object') return undefined;
+  return {
+    parsed: item.parsed as LarkMessage,
+    resources: Array.isArray(item.resources) ? item.resources as MessageResource[] : [],
+  };
 }
 
 function deliverPassthroughToExistingSession(
@@ -23791,6 +23804,8 @@ async function handleThreadReply(
   data: any,
   ctx: RoutingContext,
   prepared?: PreparedThreadReply,
+  /** 级联推迟重入：首过 preamble 的 parsed + resources。不是 PreparedThreadReply，配额与下载仍重跑。 */
+  replay?: { parsed: LarkMessage; resources: MessageResource[] },
 ): Promise<void> {
   // Admission is bot-wide but intentionally concurrent. Add a narrower FIFO
   // before entering it so two same-anchor deliveries can never invert while
@@ -23803,7 +23818,7 @@ async function handleThreadReply(
     deliveryKey,
     () => withBotTurnAdmission(
       ctx.larkAppId,
-      () => handleThreadReplyAdmitted(data, ctx, prepared),
+      () => handleThreadReplyAdmitted(data, ctx, prepared, replay),
     ),
   ).catch(err => notifyOrdinaryIngressFailure(ctx, err));
 }
@@ -23814,16 +23829,19 @@ async function handleThreadReplyAdmitted(
   data: any,
   ctx: RoutingContext,
   prepared?: PreparedThreadReply,
+  replay?: { parsed: LarkMessage; resources: MessageResource[] },
 ): Promise<void> {
   const { chatId: ctxChatId, chatType: ctxChatType, scope, anchor, larkAppId, replyRootId, substituteTrigger } = ctx;
   const runtimeSessionKey = sessionKey(ctx.runtimeRoutingAnchor ?? anchor, larkAppId);
   await waitForAutoStartJoinReady(larkAppId, anchor);
-  if (!prepared) await resolveNonsupportMessage(data, larkAppId);
-  const parsedResult = prepared ?? parseEventMessage(data);
+  // replay 已是首过 preamble 的结果：不再解析 nonsupport/interactive，也不重新 parse。
+  if (!prepared && !replay) await resolveNonsupportMessage(data, larkAppId);
+  const parsedResult = replay ?? prepared ?? parseEventMessage(data);
   const parsed = parsedResult.parsed;
   const resources = parsedResult.resources;
-  // Expand merge_forward: fetch sub-messages and collect their resources
-  if (!prepared && parsed.msgType === 'merge_forward') {
+  // Expand merge_forward: fetch sub-messages and collect their resources.
+  // 快照里的 resources 已经含展开结果，重入再拉会把子消息资源追加第二遍。
+  if (!prepared && !replay && parsed.msgType === 'merge_forward') {
     const { extraResources } = await expandMergeForward(larkAppId, parsed.messageId, parsed);
     resources.push(...extraResources);
   }
@@ -25740,7 +25758,14 @@ async function executeThreadSlash(slash: ThreadSlashContext): Promise<boolean> {
       return true;
     }
     if (slashDecision.kind === 'forward' || slashDecision.kind === 'passthrough') {
-      (existingDs.cascadeDeferred ??= []).push({ data, ctx: { ...ctx, ingressAdmission: undefined } });
+      // 快照取 preamble 之后的 parsed（语音已转写、merge_forward 已展开）。
+      // cascadeBodyReentry 只跳 learnFromMentions / thread.reply；不伪造 prepared，配额与下载重过。
+      (existingDs.cascadeDeferred ??= []).push({
+        data,
+        ctx: { ...ctx, ingressAdmission: undefined, cascadeBodyReentry: true },
+        parsed: { ...parsed },
+        resources: resources.slice(),
+      });
       markIngressAdmitted(ctx);
       logger.info(`[${anchor.substring(0, 12)}] deferred ${parsed.messageId.substring(0, 12)} behind an in-flight cascade`);
       return true;
