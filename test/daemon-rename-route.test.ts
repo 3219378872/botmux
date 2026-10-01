@@ -4033,6 +4033,33 @@ describe('runtime passthrough cascade (PR-3)', () => {
     }
   });
 
+  it('级联在飞时推迟的合并转发：首过展开没有改写类型时，重入也不再展开', async () => {
+    // 成功展开会把 msgType 改成 merge_forward_expanded，重入即使漏了 !replay 也不会再进展开。
+    // 空树 / 拉取失败保持原 msgType，这时 !replay 是唯一闸门。
+    const merge = await import('../src/im/lark/merge-forward.js');
+    const expand = vi.spyOn(merge, 'expandMergeForward').mockResolvedValue({ extraResources: [] });
+    try {
+      const { ds } = seedLiveThreadSession('om_root_casc_fwd_empty');
+      await handleThreadReply(
+        makeEventData('om_casc_fwd_empty_cmd', '/compact 只留登录上下文\n/clear', 'om_root_casc_fwd_empty'),
+        makeCtx('om_root_casc_fwd_empty', 'om_casc_fwd_empty_cmd'),
+      );
+      await tick(15);
+      ds.lastScreenStatus = 'working';
+      const forwarded = makeEventData('om_casc_fwd_empty', '', 'om_root_casc_fwd_empty');
+      forwarded.message.message_type = 'merge_forward';
+      forwarded.message.content = '{}';
+      await handleThreadReply(forwarded, makeCtx('om_root_casc_fwd_empty', 'om_casc_fwd_empty'));
+      expect(expand).toHaveBeenCalledTimes(1);
+      ds.cliReadyGeneration = 2;
+      ds.lastScreenStatus = 'idle';
+      await tick(160);
+      expect(expand).toHaveBeenCalledTimes(1);
+    } finally {
+      expand.mockRestore();
+    }
+  });
+
   it('单条透传不受影响：仍然立即以真实 messageId 送出', async () => {
     const { raws } = seedLiveThreadSession('om_root_casc4');
     await handleThreadReply(
