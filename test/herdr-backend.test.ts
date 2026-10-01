@@ -1333,10 +1333,15 @@ describe('HerdrBackend callbacks', () => {
     be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
 
     listBroken = true;
+    // First threshold (t≈1.5s) probes immediately → session still exists →
+    // keep-alive, and arms the SESSION_PROBE_CONFIRM_MIN_INTERVAL_MS backoff.
     vi.advanceTimersByTime(3_000);
     expect(exits).toEqual([]);
     sessionGone = true;
-    vi.advanceTimersByTime(3_000);
+    // Next confirmation is only due at t≈6.5s; the threshold crossing at
+    // t≈7.5s is the first one allowed through after that — the bounded
+    // exit-detection delay the keep-alive trade-off accepts.
+    vi.advanceTimersByTime(8_000);
     expect(exits).toEqual([[0, null]]);
   });
 
@@ -1387,6 +1392,47 @@ describe('HerdrBackend callbacks', () => {
     agentAlive = false;
     vi.advanceTimersByTime(600);
     expect(exits).toEqual([[0, null]]);
+    be.kill();
+  });
+
+  it('throttles the keep-alive session-list confirmation during sustained agent-list failures', () => {
+    // 60 failed polls over 30s → 20 threshold crossings. Without the backoff
+    // every crossing fires a `session list` (20 calls) — extra load on the
+    // already-struggling shared herdr host. With the 5s confirmation window
+    // only the crossings at t≈1.5s/7.5s/13.5s/19.5s/25.5s probe → 5 calls.
+    let listBroken = false;
+    let sessionListCalls = 0;
+    setHerdrResponses([
+      {
+        match: a => a[0] === 'session' && a[1] === 'list',
+        reply: () => {
+          sessionListCalls++;
+          return EXISTING_SESSION_REPLY;
+        },
+      },
+      { match: a => a.includes('agent') && a.includes('get'), reply: () => AGENT_GET_REPLY('1-1') },
+      {
+        match: a => a.includes('agent') && a.includes('list'),
+        reply: () => {
+          if (listBroken) throw new Error('agent_list_failed');
+          return AGENT_LIST_REPLY('1-1');
+        },
+      },
+      { match: a => a.includes('read') && (a.includes('agent') || a.includes('pane')), reply: () => PANE_READ_REPLY('') },
+    ]);
+
+    vi.useFakeTimers();
+    const be = new HerdrBackend(SESSION, { isReattach: true });
+    const exits: Array<[number | null, string | null]> = [];
+    be.onExit((code, signal) => exits.push([code, signal]));
+    be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+    const spawnPhaseSessionLists = sessionListCalls;
+
+    listBroken = true;
+    vi.advanceTimersByTime(30_000);
+    const confirmations = sessionListCalls - spawnPhaseSessionLists;
+    expect(confirmations).toBe(5);
+    expect(exits).toEqual([]);
     be.kill();
   });
 
