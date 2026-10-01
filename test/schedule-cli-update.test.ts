@@ -181,6 +181,23 @@ describe('schedule CLI prompt updates', () => {
 });
 
 describe('work calendar CLI configuration and persisted manual intent', () => {
+  it('lists the bundled CN region, coverage and official source without a local calendar file', async () => {
+    const f = fixture();
+    const listed = await f.run(['calendars']);
+    expect(listed.code, listed.output).toBe(0);
+    const cn = listed.output.split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line)).find(row => row.name === 'cn');
+    expect(cn).toMatchObject({ name: 'cn', kind: 'builtin', region: 'CN', dataVersion: '2026.1',
+      timeZone: 'Asia/Shanghai', coverage: { start: '2026-01-01', end: '2026-12-31' },
+      source: { authority: '国务院办公厅', documentNo: '国办发明电〔2025〕7号' } });
+    const updated = await f.run(['update', f.task.id, '--calendar', 'cn']);
+    expect(updated.code, updated.output).toBe(0);
+    expect(f.read()[f.task.id]).toMatchObject({ calendar: 'cn', ownerOpenId: f.task.ownerOpenId });
+    const local = join(f.root, '.botmux', 'bots', app, 'work-calendars.json');
+    writeFileSync(local, JSON.stringify({ version: 1, calendars: { cn: {} } }));
+    const shadowed = await f.run(['calendars']);
+    expect(shadowed.code, shadowed.output).toBe(0);
+    expect(shadowed.output).toContain('reserved_builtin_calendar');
+  });
   it('binds, reads in another process and clears a calendar without changing routing/owner', async () => {
     const f = fixture();
     const before = f.read()[f.task.id];

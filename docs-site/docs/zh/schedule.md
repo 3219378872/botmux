@@ -211,7 +211,26 @@ botmux schedule update <id> --prompt "新的完整提示词"
 
 ## 可选工作日历
 
-发布、日报和提醒可以绑定本 Bot 的命名工作日历。未绑定的存量任务保持原有行为；日历由本地 JSON 提供，调度 tick 不访问网络，也不让模型判断节假日。本功能提供通用 schema，**不内置中国或其他国家的法定节假日数据**。
+发布、日报和提醒可以按任务绑定工作日历。未绑定的存量任务保持原有行为；调度 tick 读取本地数据，不访问网络，也不让模型判断节假日。
+
+### 中国大陆全国统一工作日历
+
+首期内置的法定日历只有 `cn`：中国大陆全国统一放假调休安排，时区为 `Asia/Shanghai`，包含平日放假和周末补班。**当前已核实覆盖 2026-01-01 至 2026-12-31**，无需创建 Bot 本地日历文件即可使用：
+
+```bash
+botmux schedule add "0 9 * * *" "生成日报" --calendar cn
+botmux schedule calendars
+```
+
+2026 年的权威依据是[国务院办公厅关于2026年部分节假日安排的通知](https://www.gov.cn/zhengce/zhengceku/202511/content_7047091.htm)（国办发明电〔2025〕7号，2025-11-04 发布）；也可通过[北京市政府转载全文](https://www.beijing.gov.cn/zhengce/zhengcefagui/202511/t20251104_4258873.html)逐项核对。仓库的 `src/services/work-calendars/cn-2026.json` 保存日期、地区、适用范围、来源链接、文号、发布日期和数据版本；`schedule calendars` 输出这些来源信息。
+
+这里的“工作日”采用周一至周五基准，应用官方年度通知中的放假和补班覆盖，表示全国统一调休日历，不是所有单位、人员的实际出勤安排。地方额外节日、部分人群半日假、企业排班、港澳台及其他国家日历均不在首期内置范围内；通用本地 profile 保留为扩展能力，时区不能代替地区选择。
+
+年度数据通过读取官方通知、核对全部放假区间和补班日期、更新仓库快照及日期测试后随版本发布。更新入口与调度执行分开，不将网页抓取或第三方在线 API 放进 tick。覆盖范围外（包括尚未核实的 2027 年）返回 `calendar_out_of_coverage` 并停止自动执行，不推算或沿用上一年的安排；跨年前需升级包含下一年已核实数据的版本。
+
+`cn` 是保留的内置名称，Bot 本地文件无法覆盖它。缺失或损坏的本地扩展文件不会影响 `cn`，也不会把其他缺失名称自动降级成 `cn`。
+
+### 本地 profile 扩展
 
 在默认配置下，将下面格式的文件保存到 `~/.botmux/bots/<appId>/work-calendars.json`（与该 Bot 的 `schedules.json` 同目录）。自定义数据目录时仍使用任务存储所在目录；不同 Bot 的日历各自隔离，可以使用相同名称。建议将源文件纳入自己的版本管理，通过原子替换更新部署文件；下一次自动检查会读取新内容，无需重启 daemon。
 
@@ -242,26 +261,26 @@ botmux schedule update <id> --prompt "新的完整提示词"
 | `restDates` | 覆盖默认星期的明确休息日期 |
 | `workDates` | 覆盖默认星期的明确工作日期（如周末补班） |
 
-所有定义字段均必填；日期必须有效且处于覆盖范围内。重复日期、同一天同时列入休息和工作、重复星期、非法时区或反向覆盖区间都会拒绝该定义。文件最大 1 MiB。某个定义损坏不影响其他有效定义，但整个文件格式损坏会阻止所有绑定该文件的自动任务。
+所有定义字段均必填；日期必须有效且处于覆盖范围内。重复日期、同一天同时列入休息和工作、重复星期、非法时区或反向覆盖区间都会拒绝该定义。文件最大 1 MiB。某个定义损坏不影响其他有效定义，但整个文件格式损坏会阻止所有绑定该文件的自动任务；内置 `cn` 不受影响。
 
 ### 绑定和回读
 
 ```bash
 # 每天产生 9:00 的候选触发，再按日历过滤
-botmux schedule add "0 9 * * *" "生成日报" --calendar demo
+botmux schedule add "0 9 * * *" "生成日报" --calendar cn
 
 # 读取本 Bot 日历定义与任务的日历预览
 botmux schedule calendars
 botmux schedule list
 
 # 更新或移除绑定，保留原来的 prompt、投递位置和 owner
-botmux schedule update <task-id> --calendar demo
+botmux schedule update <task-id> --calendar cn
 botmux schedule update <task-id> --calendar none
 ```
 
 CLI 的 `--calendar none` 是移除绑定的保留值，不作为日历名使用。绑定了受保护 Bash precondition 的任务需在 Dashboard 编辑，以便同时更新其 canonical input 绑定。
 
-Dashboard 创建/编辑任务时可填写“工作日历”名称，留空取消绑定。任务行显示原始“下次”触发、日历名称、日历判断原因和“日历允许的下次触发”。API 的创建/更新 DTO 使用 `calendar: "demo"`，更新时 `calendar: null` 清除；列表回读包含 `calendar`、`calendarCheck`、`nextEligibleRunAt`，以及最近一次检查的 `lastCalendarCheck`。
+Dashboard 创建/编辑任务时可填写“工作日历”名称，中国大陆全国统一安排填 `cn`，留空取消绑定。任务行显示原始“下次”触发、日历名称、日历判断原因和“日历允许的下次触发”。API 的创建/更新 DTO 使用 `calendar: "cn"`，更新时 `calendar: null` 清除；列表回读包含 `calendar`、`calendarCheck`、`nextEligibleRunAt`，以及最近一次检查的 `lastCalendarCheck`。
 
 日历允许的下次触发是预览：它只过滤已有 cron/interval 候选，不保证 Bash precondition 通过、模型成功或消息投递成功。原始 `nextRunAt` 保留原调度语义。扫描最多 10,000 个候选本地日期；无法确认时返回 `null` 和明确原因（如 `search_limit` / `calendar_out_of_coverage`），不退化成周一至周五。
 
@@ -280,7 +299,7 @@ Dashboard 创建/编辑任务时可填写“工作日历”名称，留空取消
 
 ### 业务迁移
 
-要按法定工作日运行，先依据官方来源核实覆盖年份、完整放假/补班日期及数据使用许可，准备真实 profile，再用 **daily cron + calendar**。`0 9 * * 1-5` 本身没有周末候选，绑定日历不能创造周末触发。
+要按中国大陆全国统一工作日运行，核对内置 `cn` 的覆盖年份，再用 **daily cron + calendar**。本地扩展需自行核实来源和日期。`0 9 * * 1-5` 本身没有周末候选，绑定日历不能创造周末触发。
 
 如果业务 worker 自己硬编码 `weekday < 5`，后续还需去除重复的星期过滤，否则调度器允许的周末补班仍会被 worker 跳过。本功能不会修改业务 worker。
 

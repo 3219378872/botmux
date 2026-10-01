@@ -7635,10 +7635,22 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
   }
 
   if (sub === 'calendars') {
-    const { readWorkCalendarDefinitions, parseWorkCalendar } = await import('./services/work-calendar.js');
+    const { CN_CALENDAR_PROFILE, readWorkCalendarDefinitions, parseWorkCalendar } = await import('./services/work-calendar.js');
     const appId = scheduleStore.getScheduleScope();
     if (!appId) throw new Error('calendar_scope_missing');
-    for (const [name, value] of Object.entries(readWorkCalendarDefinitions(appId))) {
+    const { calendar: cnCalendar, ...cnProvenance } = CN_CALENDAR_PROFILE;
+    console.log(JSON.stringify({ name: 'cn', kind: 'builtin', ...cnProvenance, ...parseWorkCalendar(cnCalendar) }));
+    let definitions: Record<string, unknown>;
+    try { definitions = readWorkCalendarDefinitions(appId); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    for (const [name, value] of Object.entries(definitions)) {
+      if (name === 'cn') {
+        console.log(JSON.stringify({ name, kind: 'local', error: 'reserved_builtin_calendar' }));
+        continue;
+      }
       try { console.log(JSON.stringify({ name, ...parseWorkCalendar(value) })); }
       catch { console.log(JSON.stringify({ name, error: 'calendar_invalid' })); }
     }

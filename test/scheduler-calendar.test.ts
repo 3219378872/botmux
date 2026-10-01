@@ -76,6 +76,22 @@ async function advance(ms = 60_000) { await vi.advanceTimersByTimeAsync(ms); }
 function snapshot(id: string) { return JSON.parse(readFileSync(scheduleFilePathFor(APP), 'utf8'))[id]; }
 
 describe('calendar admission before task side effects', () => {
+  it.each([
+    ['2026-10-01T01:00:00Z', false],
+    ['2026-10-10T01:00:00Z', true],
+    ['2027-01-01T01:00:00Z', false],
+  ])('admits CN official rest/makeup/unknown dates before Bash at %s', async (now, allowed) => {
+    vi.setSystemTime(new Date(now));
+    rmSync(workCalendarPath(APP));
+    const task = create('cn');
+    const gate = installGate();
+    startScheduler();
+    await advance();
+    expect(gate.bash).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    expect(gate.model).toHaveBeenCalledTimes(allowed ? 1 : 0);
+    expect(snapshot(task.id)).toMatchObject({ calendar: 'cn', repeat: { completed: allowed ? 1 : 0 } });
+    if (!allowed) expect(snapshot(task.id).lastCalendarCheck).toMatchObject({ reason: now.startsWith('2027') ? 'calendar_out_of_coverage' : 'rest_date' });
+  });
   it('skips before Bash/model, preserves repeat/follow-active/multi-chat and records a non-failure reason', async () => {
     const task = create('demo', { chatIds: ['fixture_chat', 'fixture_chat_2'], executionPosition: 'new-topic' });
     const gate = installGate();

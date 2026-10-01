@@ -2725,7 +2725,7 @@ export function ScheduleFormModal(props: {
         ) : null}
         <label className="schedule-form-field">
           <span className="schedule-form-label">{tr('schedules.form.calendar')}</span>
-          <input value={calendar} onChange={e => setCalendar(e.target.value)} placeholder="team-work" />
+          <input value={calendar} onChange={e => setCalendar(e.target.value)} placeholder="cn" />
           <small className="schedule-form-help">{tr('schedules.form.calendarHelp')}</small>
         </label>
         <label className="schedule-form-field">
