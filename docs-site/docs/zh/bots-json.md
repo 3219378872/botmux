@@ -472,7 +472,7 @@ Dashboard 的“会议角色预设”提供本地内置模板库，当前包含�
 
 在线策略修改在**下次 worker 冷启动**生效；离线终端命令只更新 bots.json，daemon 下次启动时读取。活跃 worker 内的 CLI 重启/自动恢复沿用其已冻结策略。daemon 重启恢复持久 pane 时比较无秘密值的策略指纹；旧 pane 没有严格策略记录、记录损坏或获准列表变化时，先关闭并确认消失再冷启动，确认失败则拒绝启动。CLI 已读取的环境不能被热更新撤回。
 
-严格模式覆盖 Botmux 自己启动的 PTY、tmux、tmux-pipe、zellij、zmx，以及本机 Codex/TraeX RPC App Server 和标题生成子进程。tmux/zellij 不加载 `launchShell` 的启动 profile，而是直接以 `/usr/bin/env -i` 启动 CLI；zmx 使用无 profile 的固定启动 shell 和空环境 exec。PATH/nvm/mise 等须由运行基线或本 bot 的显式配置提供。共享 server 的已有全局环境不被清空；严格 pane 的 exec 会清空继承，获准凭证也不会写回 server 全局。v3 workflow 冻结无秘密的策略并在运行时读取本 bot 配置的 env，不把凭证写入 bot snapshot。
+严格模式覆盖 Botmux 自己启动的 PTY、tmux、tmux-pipe、zellij、zmx，以及本机 Codex/TraeX RPC App Server 和标题生成子进程。tmux/zellij 不加载 `launchShell` 的启动 profile，而是直接以 `/usr/bin/env -i` 启动 CLI；zmx 使用无 profile 的固定启动 shell 和空环境 exec。PATH/nvm/mise 等须由运行基线或本 bot 的显式配置提供。共享 server 不做全局清空，沿用已有敏感项清理；严格 pane 的 exec 会清空继承，获准凭证也不会写回 server 全局。v3 workflow 冻结无秘密的策略并在运行时读取本 bot 配置的 env，不把凭证写入 bot snapshot。
 
 Herdr、Riff、Mojo、Forge 启动模式、adopt 外部进程和外部 App Server 尚不能建立同一启动边界，显式严格模式会拒绝这些路径。用户主动执行的 shell/profile、CLI 自己读取的配置和凭证文件、全局文件权限与云端账号不在环境继承策略的隔离范围内。`codexAuthSync`、per-bot `CODEX_HOME` 与文件沙箱维持独立行为；严格模式不替代它们。
 

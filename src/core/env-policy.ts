@@ -69,9 +69,18 @@ export function buildBotWorkerEnv(base: NodeJS.ProcessEnv, policy?: EnvPolicy): 
     for (const key of [...BOTMUX_INJECTED_ENV_KEYS, ...WORKFLOW_WORKER_ENV_KEYS,
       'BOTMUX_SANDBOX', 'BOTMUX_CORE_ONLY', 'BOTMUX_HOME', 'BOTMUX_CONFIG_DIR',
       'BOTMUX_DATA_DIR', 'BOTMUX_NO_CLAIM', 'BOTMUX_BOT_INDEX',
+      'BOTMUX_WORKFLOW_ENABLED', 'BOTMUX_REQUIRE_MENTION_DECISION', 'BOTMUX_LANG',
       'BOTMUX_WORKER_HTTP_HOST', 'BOTMUX_WORKER_HOST', 'LARK_APP_ID', 'LARK_APP_SECRET',
     ]) {
       if (isReservedPerBotEnvKey(key) && base[key] !== undefined) env[key] = base[key];
+    }
+  }
+  if (policy?.mode === 'strict') {
+    // Host-owned worker HTTP/watchdog settings are control-plane only. The
+    // CLI boundary does not retain them without an explicit user grant.
+    for (const key of ['WEB_HOST', 'WEB_EXTERNAL_HOST', 'WEB_EXTERNAL_PORT',
+      'STUCK_DETECTOR_ENABLED', 'STUCK_DETECTOR_TIMEOUT_MS']) {
+      if (base[key] !== undefined) env[key] = base[key];
     }
   }
   return env;
