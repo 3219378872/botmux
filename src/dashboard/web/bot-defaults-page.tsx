@@ -1553,6 +1553,7 @@ function RuntimeEnvironmentSection(props: { bot: BotDefaultsRow; patchBot: Patch
     <section className="bd-section bd-runtime-env">
       <h3 className="bd-section-title">{tr('botDefaults.sectionRuntimeEnv')}</h3>
       <LaunchShellSection bot={props.bot} patchBot={props.patchBot} />
+      <EnvPolicySection bot={props.bot} patchBot={props.patchBot} />
       <EnvSection bot={props.bot} patchBot={props.patchBot} />
     </section>
   );
@@ -7062,13 +7063,47 @@ function LaunchShellSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) 
   );
 }
 
-function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
+export function EnvPolicySection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
   const tr = useT();
-  const [value, setValue] = useState(typeof props.bot.env === 'string' ? props.bot.env : '');
+  const [mode, setMode] = useState<'inherit' | 'strict'>(props.bot.envPolicy?.mode ?? 'inherit');
+  const [names, setNames] = useState((props.bot.envPolicy?.inherit ?? []).join(', '));
+  const [status, setStatus] = useState<StatusMessage>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    setMode(props.bot.envPolicy?.mode ?? 'inherit');
+    setNames((props.bot.envPolicy?.inherit ?? []).join(', '));
+  }, [props.bot.larkAppId, props.bot.envPolicy]);
+  async function save(): Promise<void> {
+    setBusy(true);
+    setStatus(null);
+    try {
+      const envPolicy = { mode, ...(mode === 'strict' ? { inherit: names.split(/[\s,]+/).filter(Boolean) } : {}) };
+      const res = await sendJson('PUT', `/api/bots/${encodeURIComponent(props.bot.larkAppId)}/env-policy`, { envPolicy });
+      if (res.ok && res.body.ok) {
+        props.patchBot(props.bot.larkAppId, { envPolicy });
+        setStatus({ text: tr('botDefaults.envPolicySaved'), ok: true });
+      } else setStatus({ text: tr('botDefaults.envPolicyInvalid') });
+    } catch { setStatus({ text: tr('botDefaults.envPolicyInvalid') }); }
+    finally { setBusy(false); }
+  }
+  return <div className="bd-subsection">
+    <h4 className="bd-subsection-title"><FieldTitle help={tr('botDefaults.envPolicyHelp')}>{tr('botDefaults.envPolicyLabel')}</FieldTitle></h4>
+    <select data-input="envPolicyMode" value={mode} disabled={busy} onChange={e => setMode(e.currentTarget.value as 'inherit' | 'strict')}>
+      <option value="inherit">{tr('botDefaults.envPolicyInherit')}</option>
+      <option value="strict">{tr('botDefaults.envPolicyStrict')}</option>
+    </select>
+    {mode === 'strict' && <input data-input="envPolicyNames" value={names} disabled={busy} placeholder="HTTPS_PROXY, NODE_EXTRA_CA_CERTS" onChange={e => setNames(e.currentTarget.value)} />}
+    <div className="actions"><button className="primary" type="button" data-action="save-env-policy" disabled={busy} onClick={() => void save()}>{tr('botDefaults.envPolicySave')}</button><StatusSpan status={status} /></div>
+  </div>;
+}
+
+export function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
+  const tr = useT();
+  const [value, setValue] = useState('');
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => setValue(typeof props.bot.env === 'string' ? props.bot.env : ''), [props.bot.env]);
+  useEffect(() => setValue(''), [props.bot.larkAppId]);
 
   async function save(): Promise<void> {
     setStatus(null);
@@ -7076,9 +7111,9 @@ function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
     try {
       const res = await sendJson('PUT', `/api/bots/${encodeURIComponent(props.bot.larkAppId)}/env`, { env: value });
       if (res.ok && res.body.ok) {
-        const next = typeof res.body.env === 'string' ? res.body.env : '';
+        const next = ''; // Never echo stored values, including older daemon responses.
         setValue(next);
-        props.patchBot(props.bot.larkAppId, { env: next });
+        props.patchBot(props.bot.larkAppId, { env: next, envKeys: Array.isArray(res.body.envKeys) ? res.body.envKeys : [] });
         setStatus({ text: `✓ ${tr('botDefaults.cardPrefSaved')}`, ok: true });
       } else {
         setStatus({ text: `✗ ${responseErrorText(res)}` });
@@ -7093,6 +7128,8 @@ function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
   return (
     <div className="bd-subsection">
       <h4 className="bd-subsection-title"><FieldTitle help={tr('botDefaults.envHelp')}>{tr('botDefaults.sectionEnv')}</FieldTitle></h4>
+      <p>{tr('botDefaults.envStoredNames', { names: (props.bot.envKeys ?? []).join(', ') || '∅' })}</p>
+      <p className="muted">{tr('botDefaults.envWriteOnly')}</p>
       <textarea
         data-input="env"
         rows={5}

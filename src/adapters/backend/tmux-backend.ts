@@ -6,6 +6,8 @@ import type { SessionBackend, SpawnOpts, SessionProbe } from './types.js';
 import { probeTmuxFunctional, scrubTmuxServerGlobalEnv, tmuxEnv, getTmuxVersionCached, tmuxVersionAtLeast } from '../../setup/ensure-tmux.js';
 import { BOTMUX_INJECTED_ENV_KEYS, CA_BUNDLE_ENV_KEYS, PROXY_ENV_KEYS, REDACTED_CHILD_ENV_KEYS, WORKFLOW_WORKER_ENV_KEYS } from '../../utils/child-env.js';
 import { sanitizePerBotEnv } from '../../core/per-bot-env.js';
+import { inheritBotEnv } from '../../core/env-policy.js';
+import { strictPaneCommand } from './strict-env.js';
 import { logger } from '../../utils/logger.js';
 import { isExecutable } from '../../utils/executable.js';
 import { resolveBotmuxWrapperBinDir } from '../../core/botmux-wrapper.js';
@@ -307,6 +309,7 @@ export class TmuxBackend implements SessionBackend {
     // (once per daemon process; no-op on a server this build booted clean).
     TmuxBackend.scrubServerGlobalEnvOnce();
     this.reattaching = TmuxBackend.hasSession(this.sessionName);
+    if (opts.strictEnv && this.reattaching && !opts.strictEnvReattach) throw new Error('Refusing unverified strict tmux reattach');
     const instanceIdentity = opts.env?.BOTMUX_CODEX_INSTANCE_BINDING;
     if (this.reattaching && instanceIdentity) TmuxBackend.assertInstanceIdentity(this.sessionName, instanceIdentity);
     logger.debug(
@@ -319,7 +322,7 @@ export class TmuxBackend implements SessionBackend {
     // session's socket. After the user's terminal tmux dies, every call
     // here would print `error connecting to <stale-socket>` to the PTY and
     // flood the daemon log via the leaked-stderr path.
-    const childEnv = tmuxEnv(opts.env);
+    const childEnv = tmuxEnv(opts.strictEnv ? inheritBotEnv(opts.env, { mode: 'strict' }) : opts.env);
 
     if (this.reattaching) {
       // Re-attach to surviving tmux session (CLI is still running)
@@ -361,7 +364,7 @@ export class TmuxBackend implements SessionBackend {
       //     session env (visible to the shell), which means the user's rcfile
       //     could `unset` or `export` over it before the CLI sees it. env(1)
       //     injection happens after rcfile load and is authoritative.
-      const shellSpec = resolveUserShell(process.env, opts.launchShell);
+      const shellSpec = opts.strictEnv ? { shell: '/bin/sh', flags: [] } : resolveUserShell(process.env, opts.launchShell);
       const envAssignments = buildBotmuxEnvAssignments(opts.env, opts.injectEnv);
       // Debug knob — when on, the wrapper does NOT `exec` the CLI; it runs the
       // CLI as a child and then drops into an interactive `$shell -i` so the
@@ -369,7 +372,7 @@ export class TmuxBackend implements SessionBackend {
       // the CLI with Ctrl-C. Worker will still think the CLI is alive (it
       // can't see the child-vs-exec distinction), so don't send messages
       // through the bot while in this mode — type into the web terminal directly.
-      const debugKeepShell = process.env.BOTMUX_DEBUG_KEEP_SHELL === '1';
+      const debugKeepShell = !opts.strictEnv && process.env.BOTMUX_DEBUG_KEEP_SHELL === '1';
       // Host-resolve the wrapper bin dir from opts.env (BOTMUX_CORE_ONLY /
       // SESSION_DATA_DIR are scrubbed inside the pane before the script runs, so it
       // MUST be baked in host-side — codex P1). opts.env is the authoritative
@@ -393,11 +396,11 @@ export class TmuxBackend implements SessionBackend {
         '-y', String(opts.rows),
         ...(instanceIdentity ? ['-e', `BOTMUX_CODEX_INSTANCE_BINDING=${instanceIdentity}`] : []),
         '--',
-        ...shellCommandArgv(shellSpec, script, [
+        ...(opts.strictEnv ? strictPaneCommand(bin, args, opts) : shellCommandArgv(shellSpec, script, [
           opts.cwd,
           ...envAssignments,
           bin, ...args,
-        ]),
+        ])),
       ];
       this.process = pty.spawn('tmux', tmuxArgs, {
         name: 'xterm-256color',

@@ -125,6 +125,8 @@ import { remoteWorkerShutdownInputBlocker } from './core/remote-worker-shutdown-
 import { ReadyGate, shouldArmReadyGate } from './utils/ready-gate.js';
 import { shouldRunStartupCommandsOnSpawn, shouldDeferInitialPromptForStartup } from './core/startup-commands.js';
 import { sanitizePerBotEnv } from './core/per-bot-env.js';
+import { botInjectedEnv, buildSessionChildEnv } from './core/env-policy.js';
+import { envPolicyRequiresColdStart, readEnvPolicyStamp, writeEnvPolicyStamp } from './services/env-policy-stamp.js';
 import { cliModelSupportsReasoningEffort } from './services/codex-reasoning-effort.js';
 import { normalizeExistingAppServerEndpoint } from './core/existing-app-server.js';
 import { resolveChildBotsConfig } from './core/config-dir.js';
@@ -982,8 +984,8 @@ async function codexRolloutProbe(cliId: string, threadId: string, promptText: st
 
 function codexNativeTitleEnv(cfg: Extract<DaemonToWorker, { type: 'init' }>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
-    ...redactChildEnv(process.env),
-    ...sanitizePerBotEnv(cfg.env),
+    ...buildSessionChildEnv(process.env, cfg.envPolicy),
+    ...botInjectedEnv(cfg.env, cfg.envPolicy),
   };
   env.PATH = prependBotmuxBin(resolveBotmuxWrapperBinDir(process.env), env.PATH);
   return env;
@@ -1173,8 +1175,8 @@ async function captureCodexResumeTitleBaseline(threadId: string, engine?: CodexR
     }
     const adapter = createCliAdapterSync('codex', cfg.cliPathOverride);
     const env: NodeJS.ProcessEnv = {
-      ...redactChildEnv(process.env),
-      ...sanitizePerBotEnv(cfg.env),
+      ...buildSessionChildEnv(process.env, cfg.envPolicy),
+      ...botInjectedEnv(cfg.env, cfg.envPolicy),
     };
     env.PATH = prependBotmuxBin(resolveBotmuxWrapperBinDir(process.env), env.PATH);
     const abortController = new AbortController();
@@ -1310,7 +1312,7 @@ async function engageCodexRpc(cfg: Extract<DaemonToWorker, { type: 'init' }>): P
     // same-(turnId,attempt) entry installed by its replacement.
     const engineCliGeneration = cliSpawnGeneration + 1;
     const cliBin = createCliAdapterSync(cfg.cliId as CliId, cfg.cliPathOverride).resolvedBin;
-    const engineEnv: NodeJS.ProcessEnv = { ...redactChildEnv(process.env) };
+    const engineEnv: NodeJS.ProcessEnv = { ...buildSessionChildEnv(process.env, cfg.envPolicy) };
     engineEnv.PATH = prependBotmuxBin(resolveBotmuxWrapperBinDir(process.env), engineEnv.PATH);
     engineEnv.BOTMUX_SESSION_ID = cfg.sessionId;
     // In Codex/TraeX RPC mode the app-server, not the remote viewer TUI, runs
@@ -1335,7 +1337,7 @@ async function engageCodexRpc(cfg: Extract<DaemonToWorker, { type: 'init' }>): P
     // per-bot provider env (base-url + token, proxy, feature flags) spawnCli
     // injects into the TUI — else a 3rd-party-provider bot's app-server silently
     // falls back to the default provider. Re-sanitized (crossed IPC).
-    Object.assign(engineEnv, sanitizePerBotEnv(cfg.env));
+    Object.assign(engineEnv, botInjectedEnv(cfg.env, cfg.envPolicy));
     if (cfg.promptInjection === 'none') clearBotmuxPromptEnv(engineEnv);
     applyCodexInstanceEnv(engineEnv, cfg.cliInstanceBinding);
     // Session identity is host-owned. Pin it after the config-controlled merge,
@@ -13976,6 +13978,15 @@ async function spawnCli(
   cfg: Extract<DaemonToWorker, { type: 'init' }>,
   opts: { pluginGenerationPrepared?: boolean } = {},
 ): Promise<void> {
+  if (cfg.envPolicy?.mode === 'strict' && (cfg.adoptMode || cfg.existingAppServerEndpoint || cfg.cliLaunchMode === 'forge-traex')) {
+    throw new Error('envPolicy strict cannot control an adopted process or an external App Server; create a Botmux-owned session');
+  }
+  // These backends currently start user shell processes before our command,
+  // or run tools through a separate local/cloud launcher. Refuse to claim a
+  // boundary until those launch protocols can express an empty initial env.
+  if (cfg.envPolicy?.mode === 'strict' && ['herdr', 'mojo', 'riff'].includes(cfg.backendType)) {
+    throw new Error('envPolicy strict currently supports pty, tmux, zellij and zmx backends');
+  }
   const spawnGeneration = ++cliSpawnGeneration;
   if (cfg.cliInstanceBinding && cfg.cliInstanceBinding.source !== 'legacy' && cfg.backendType === 'tmux') {
     TmuxBackend.assertInstanceIdentity(TmuxBackend.sessionName(cfg.sessionId), codexInstanceIdentity(cfg.cliInstanceBinding, cfg.cliRuntime));
@@ -14385,7 +14396,7 @@ async function spawnCli(
       workingDir: cfg.workingDir,
       model: cfg.model,
       disableCliBypass: cfg.disableCliBypass,
-      env: cfg.env ? sanitizePerBotEnv(cfg.env) : undefined,
+      env: cfg.env ? botInjectedEnv(cfg.env, cfg.envPolicy) : undefined,
       // Resume the persisted lineage: daemon restart, /relay and worker rebuilds
       // all arrive with riffParentTaskId set (the shared remote-lineage channel —
       // see the riff_task_id IPC message, emitted by the generic
@@ -14488,7 +14499,7 @@ async function spawnCli(
     // explicit riff config.env takes precedence over both. The workflow
     // kill-switch is a host-resolved snapshot and is re-frozen AFTER this merge
     // (see below), so it is intentionally NOT set in sessionEnv here.
-    const mergedEnv: Record<string, string> = { ...sessionEnv, ...sanitizePerBotEnv(cfg.env), ...riffCfg.env };
+    const mergedEnv: Record<string, string> = { ...sessionEnv, ...botInjectedEnv(cfg.env, cfg.envPolicy), ...riffCfg.env };
     // The effective policy is a host-resolved snapshot, not a user-overridable
     // backend env knob. Re-freeze it after config.env/per-bot env merge.
     if (cfg.feedback) mergedEnv.BOTMUX_FEEDBACK_POLICY = JSON.stringify(cfg.feedback);
@@ -15344,8 +15355,9 @@ async function spawnCli(
   // Otherwise kill + cold-spawn so the freshly copied credential takes effect.
   if (willReattachPersistent && persistentSessionName && effectiveBackendType !== 'pty') {
     const launchedWith = readCredentialSourceStamp(config.session.dataDir, cfg.sessionId);
-    if (launchedWith !== (credentialSourceDir ?? null)) {
-      log(`[credentials-source] persistent pane ${cfg.sessionId} was launched with a different credential source — killing + cold-spawning`);
+    const envPolicyChanged = envPolicyRequiresColdStart(readEnvPolicyStamp(config.session.dataDir, cfg.sessionId), cfg.envPolicy);
+    if (launchedWith !== (credentialSourceDir ?? null) || envPolicyChanged) {
+      log(`[credentials-source] persistent pane ${cfg.sessionId} has a different credential source or environment policy — killing + cold-spawning`);
       const persistentBackendType = effectiveBackendType as PersistentBackendType;
       const persistentTarget = selectedBackend.persistentBackendTarget;
       if (effectiveBackendType === 'zmx') {
@@ -15558,7 +15570,7 @@ async function spawnCli(
   // adapter probe below queries the exact DB Hermes will `--resume` against.
   const hermesResumeStateDbPath = cfg.cliId === 'hermes'
     ? resolveHermesStateDbPath(
-      { ...process.env, ...sanitizePerBotEnv(cfg.env), BOTMUX_SESSION_ID: cfg.sessionId },
+      { ...buildSessionChildEnv(process.env, cfg.envPolicy), ...botInjectedEnv(cfg.env, cfg.envPolicy), BOTMUX_SESSION_ID: cfg.sessionId },
       { botmuxSessionProfile: basename(cfg.cliPathOverride ?? '') === 'hermes-botmux-session' },
     )
     : undefined;
@@ -15803,7 +15815,7 @@ async function spawnCli(
   let perBotSettingsEnv: Record<string, string> | undefined;
   let perBotSettingsFilePath: string | undefined;
   if (cliAdapter.claudeDataDir && cfg.env && process.env.SESSION_DATA_DIR) {
-    const sanitized = sanitizePerBotEnv(cfg.env);
+    const sanitized = botInjectedEnv(cfg.env, cfg.envPolicy);
     if (Object.keys(sanitized).length > 0) {
       perBotSettingsEnv = sanitized;
       const settingsDir = willRedirectCliData && claudeDataDir
@@ -15817,7 +15829,7 @@ async function spawnCli(
 
     }
   }
-  const perBotInjectEnv = sanitizePerBotEnv(cfg.env);
+  const perBotInjectEnv = botInjectedEnv(cfg.env, cfg.envPolicy);
   if (cfg.promptInjection === 'none') clearBotmuxPromptEnv(perBotInjectEnv);
   const cliExtra = cliAdapter.allowExtraArgs === false
     ? ''
@@ -16004,7 +16016,7 @@ async function spawnCli(
   // bots.json on disk (im/lark/client.ts), `botmux ask` routes via the
   // namespaced BOTMUX_LARK_APP_ID injected below; the worker keeps its own
   // bare creds (forkWorker) for lark-upload. See utils/child-env.ts.
-  const childEnv = redactChildEnv(process.env);
+  const childEnv = buildSessionChildEnv(process.env, cfg.envPolicy);
   if (cfg.promptInjection === 'none') clearBotmuxPromptEnv(childEnv);
   childEnv[PLUGIN_CARD_ACTION_CAPABILITIES_ENV] = cardActionCapabilities;
   if (sessionMcpGatewayHost) {
@@ -17487,7 +17499,7 @@ async function spawnCli(
       binResolver: (b) => locateOnPath(b) ?? b,
       ttadkModel: cfg.model,
     });
-    capturedSpawnCommand = buildReproduceCommand({
+    capturedSpawnCommand = cfg.envPolicy?.mode === 'strict' ? null : buildReproduceCommand({
       backendType: effectiveBackendType,
       bin: reproduceLaunch.bin,
       args: reproduceLaunch.args,
@@ -17545,10 +17557,13 @@ async function spawnCli(
       env: childEnv as Record<string, string>,
       injectEnv: perBotInjectKeys.length ? perBotInjectEnv : undefined,
       launchShell: lastInitConfig?.launchShell,
+      strictEnv: cfg.envPolicy?.mode === 'strict',
+      strictEnvReattach: willReattachPersistent,
       // spawnBin may now be a launch wrapper (session scope / wrapperCli /
       // credential sandbox); the Herdr facade still needs the real CLI name.
       cliBin: cliAdapter.resolvedBin,
     });
+    if (!willReattachPersistent) writeEnvPolicyStamp(config.session.dataDir, cfg.sessionId, cfg.envPolicy);
   } catch (err) {
     cleanupCodexAppControlBootstrap();
     throw err;
@@ -21855,7 +21870,7 @@ process.on('message', async (raw: unknown) => {
       }
       // per-bot env 热更：daemon 发 restart 时捎带 bots.json `env` 的最新值
       // （live-worker restart 不 refork，没有 init 重发这条通道），respawn 前
-      // 全量覆盖 lastInitConfig.env —— spawnCli 的 sanitizePerBotEnv(cfg.env)
+      // 全量覆盖 lastInitConfig.env —— spawnCli 的 botInjectedEnv(cfg.env, cfg.envPolicy)
       // 每次 spawn 都重跑，覆盖即在重启出的 CLI 上生效。undefined=不携带（旧
       // daemon / 兜底）保持快照；null=dashboard 已清空 → 移除快照。与上面的
       // cwd merge 一样放在合并守卫之前：被合并的重复 restart 也应带走 env

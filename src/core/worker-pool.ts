@@ -66,6 +66,7 @@ import {
   type MojoLivePatch,
 } from '../adapters/backend/mojo-types.js';
 import { sanitizePerBotEnv } from './per-bot-env.js';
+import { buildBotWorkerEnv } from './env-policy.js';
 import { normalizeExistingAppServerEndpoint } from './existing-app-server.js';
 import {
   isExistingAppServerSharedAdoptPersistedSession,
@@ -12003,7 +12004,7 @@ export function forkWorker(
   const botmuxBinDir = resolveBotmuxWrapperBinDir(process.env);
   const pathWithBotmux = prependBotmuxBin(botmuxBinDir, process.env.PATH);
 
-  const forkEnv = workerForkEnv(process.env);
+  const forkEnv = workerForkEnv(buildBotWorkerEnv(process.env, botCfg.envPolicy));
   // Dequeue only after every earlier launch-preparation write has finished.
   // The exact input remains journaled until the worker confirms its adapter
   // submission boundary; daemon send/ready are intentionally too early.
@@ -12311,6 +12312,7 @@ export function forkWorker(
     // ANTHROPIC_BASE_URL/AUTH_TOKEN for a GLM/3rd-party bot). Adopt sessions are
     // observed, not driven, so forkAdoptWorker intentionally omits it.
     env: ds.session.cliLaunchSnapshot || ds.session.cliInstanceBinding ? undefined : botCfg.env,
+    envPolicy: botCfg.envPolicy,
     // Freeze the normalized sparse reply style at worker spawn. Both the
     // session-rendered botmux-send guide and the CLI card renderer consume the
     // same env snapshot, so a dashboard edit cannot split their behavior inside
@@ -17600,7 +17602,7 @@ export function forkAdoptWorker(
   const rawAdoptCwd = adopted.cwd ?? ds.workingDir ?? process.cwd();
   const adoptCwd = rawAdoptCwd && existsSync(rawAdoptCwd) ? rawAdoptCwd : homedir();
   if (adoptCwd !== rawAdoptCwd) logger.warn(`[${t}] adopt cwd "${rawAdoptCwd}" does not exist — falling back to ${adoptCwd}`);
-  const forkEnv = workerForkEnv(process.env);
+  const forkEnv = workerForkEnv(buildBotWorkerEnv(process.env, botCfg.envPolicy));
   // Node: fork `dist/worker.js`. Standalone binary: re-exec THIS binary with the
   // hidden `__worker` subcommand over the same IPC channel (see self-spawn.ts).
   const worker = spawnWorker({
@@ -17779,6 +17781,7 @@ export function forkAdoptWorker(
     // The worker's adopt branch picks the backend from whichever is present.
     backendType: adoptBackendType,
     adoptMode: true,
+    envPolicy: botCfg.envPolicy,
     adoptSource: adopted.source ?? adoptBackendType,
     adoptTmuxTarget: adopted.tmuxTarget,
     adoptHerdrSessionName: adopted.herdrSessionName,
