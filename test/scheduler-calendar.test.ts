@@ -228,9 +228,11 @@ describe('calendar admission before task side effects', () => {
       startScheduler();
       await advance(5_000);
     }
+    // runNow dispatches in the background. Wait for its persisted completion;
+    // advancing by zero does not drain the whole Promise chain under Bun.
+    await vi.waitFor(() => expect(snapshot(task.id)).toMatchObject({ lastStatus: 'ok', lastCalendarCheck: { reason: 'manual_bypass' } }));
     expect(gate.bash).toHaveBeenCalledTimes(1);
     expect(gate.model).toHaveBeenCalledTimes(1);
-    expect(snapshot(task.id)).toMatchObject({ lastStatus: 'ok', lastCalendarCheck: { reason: 'manual_bypass' } });
     expect(snapshot(task.id).manualRunRequested).toBeUndefined();
   });
   it('rejects once binding on create/update while preserving legacy once', () => {
