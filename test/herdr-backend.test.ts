@@ -1340,6 +1340,56 @@ describe('HerdrBackend callbacks', () => {
     expect(exits).toEqual([[0, null]]);
   });
 
+  it('agent list AND session list both failing (probe unknown) never reports an exit; recovery reports it via row absence', () => {
+    // Total outage: `agent list` fails AND the `session list` confirmation
+    // fails, so probeSession() yields 'unknown' — which must NOT be collapsed
+    // into 'missing'. The CLI stays alive; once herdr recovers and the agent
+    // row is genuinely gone, the ordinary row-absence path reports the exit.
+    let listBroken = false;
+    let sessionListBroken = false;
+    let agentAlive = true;
+    setHerdrResponses([
+      {
+        match: a => a[0] === 'session' && a[1] === 'list',
+        reply: () => {
+          if (sessionListBroken) throw new Error('session_list_failed');
+          return EXISTING_SESSION_REPLY;
+        },
+      },
+      { match: a => a.includes('agent') && a.includes('get'), reply: () => AGENT_GET_REPLY('1-1') },
+      {
+        match: a => a.includes('agent') && a.includes('list'),
+        reply: () => {
+          if (listBroken) throw new Error('agent_list_failed');
+          return agentAlive ? AGENT_LIST_REPLY('1-1') : JSON.stringify({ result: { agents: [] } });
+        },
+      },
+      { match: a => a.includes('read') && (a.includes('agent') || a.includes('pane')), reply: () => PANE_READ_REPLY('') },
+    ]);
+
+    vi.useFakeTimers();
+    const be = new HerdrBackend(SESSION, { isReattach: true });
+    const exits: Array<[number | null, string | null]> = [];
+    be.onExit((code, signal) => exits.push([code, signal]));
+    be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+
+    // Both commands down for a long stretch — every confirmation probe comes
+    // back unknown, so the keep-alive branch must hold, not exit.
+    listBroken = true;
+    sessionListBroken = true;
+    vi.advanceTimersByTime(20_000);
+    expect(exits).toEqual([]);
+
+    // herdr fully recovers AND the agent row really vanished → the first
+    // successful `agent list` reports the exit through row absence.
+    listBroken = false;
+    sessionListBroken = false;
+    agentAlive = false;
+    vi.advanceTimersByTime(600);
+    expect(exits).toEqual([[0, null]]);
+    be.kill();
+  });
+
   it('onExit fires when the agent stays in list with running:false (v0.6.6 tombstone)', () => {
     // herdr v0.6.6+ does NOT drop exited agents from `agent list` — they
     // stick around with running:false / status:"exited". Without this
