@@ -14650,6 +14650,7 @@ tbody tr[data-chat]:hover {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
+.schedule-run-log-fill > .outcome-calendar_skipped,
 .schedule-run-log-fill > .outcome-precondition_skipped {
   background: color-mix(in srgb, var(--warning) 10%, transparent);
 }
@@ -29764,6 +29765,7 @@ button.schedule-run-log-row::before {
   background: var(--accent);
 }
 
+button.schedule-run-log-row.outcome-calendar_skipped::before,
 button.schedule-run-log-row.outcome-precondition_skipped::before {
   background: var(--warning);
 }
@@ -29870,6 +29872,7 @@ button.schedule-run-log-row:focus-visible {
   white-space: nowrap;
 }
 
+.schedule-run-log-outcome.outcome-calendar_skipped,
 .schedule-run-log-outcome.outcome-precondition_skipped {
   background: color-mix(in srgb, var(--warning) 10%, var(--surface));
   color: var(--warning);

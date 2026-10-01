@@ -179,3 +179,35 @@ describe('schedule CLI prompt updates', () => {
       expect(readFileSync(f.path, 'utf8')).toBe(before);
     });
 });
+
+describe('work calendar CLI configuration and persisted manual intent', () => {
+  it('binds, reads in another process and clears a calendar without changing routing/owner', async () => {
+    const f = fixture();
+    const before = f.read()[f.task.id];
+    const updated = await f.run(['update', f.task.id, '--calendar', 'demo']);
+    expect(updated.code, updated.output).toBe(0);
+    expect(f.read()[f.task.id]).toMatchObject({ ...before, calendar: 'demo' });
+    const definitions = JSON.parse(readFileSync(new URL('./fixtures/work-calendar/demo.json', import.meta.url), 'utf8'));
+    writeFileSync(join(f.root, '.botmux', 'bots', app, 'work-calendars.json'), JSON.stringify(definitions));
+    const list = await f.run(['list']);
+    expect(list.code, list.output).toBe(0);
+    expect(list.output).toContain('calendar: demo');
+    expect(list.output).toContain('nextEligibleRunAt');
+    const calendars = await f.run(['calendars']);
+    expect(calendars.code, calendars.output).toBe(0);
+    expect(calendars.output).toContain('"name":"demo"');
+    const requested = await f.run(['run', f.task.id]);
+    expect(requested.code, requested.output).toBe(0);
+    expect(f.read()[f.task.id].manualRunRequested).toBe(true);
+    const cleared = await f.run(['update', f.task.id, '--calendar', 'none']);
+    expect(cleared.code, cleared.output).toBe(0);
+    expect(f.read()[f.task.id].calendar).toBeUndefined();
+    expect(f.read()[f.task.id].ownerUnionId).toBe(before.ownerUnionId);
+  });
+  it('adds with --calendar and preserves exact prompt bytes', async () => {
+    const f = fixture();
+    const added = await f.run(['add', '0 9 * * *', 'fixture prompt', '--id', 'aabbcc01', '--calendar', 'demo', '--chat-id', 'fixture_chat', '--new-topic', '--workdir', f.root]);
+    expect(added.code, added.output).toBe(0);
+    expect(f.read().aabbcc01).toMatchObject({ calendar: 'demo', prompt: 'fixture prompt', executionPosition: 'new-topic', larkAppId: app });
+  });
+});

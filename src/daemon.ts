@@ -28698,6 +28698,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
           finishedAt,
           durationMs: Math.max(0, Date.parse(finishedAt) - Date.parse(executionContext.startedAt)),
           additionalPrompt: precondition.additionalPrompt,
+          calendarCheck: task.lastCalendarCheck,
           ...(errorDetails?.errorCode ? { errorCode: errorDetails.errorCode } : {}),
           ...(errorDetails?.error !== undefined ? { error: errorDetails.error } : {}),
           ...(targetResults !== undefined ? { targetResults } : {}),

@@ -46,7 +46,7 @@ type ScheduleBotOption = {
 };
 type ScheduleAction = 'run' | 'pause' | 'resume';
 type ActionFeedback = 'success' | 'error';
-type ScheduleRunOutcome = 'model_dispatched' | 'precondition_skipped' | 'error';
+type ScheduleRunOutcome = 'model_dispatched' | 'precondition_skipped' | 'calendar_skipped' | 'error';
 type ScheduleTargetRunResult = {
   chatId: string;
   outcome: 'model_dispatched' | 'error';
@@ -60,7 +60,8 @@ type ScheduleRunLogEntry = {
   finishedAt: string;
   durationMs: number;
   outcome: ScheduleRunOutcome;
-  precondition: 'none' | 'disabled' | 'passed' | 'skipped' | 'error';
+  calendarCheck?: { calendar: string; reason: string; date?: string; timeZone?: string };
+  precondition: 'not_checked' | 'none' | 'disabled' | 'passed' | 'skipped' | 'error';
   additionalPrompt: boolean;
   errorCode?: string;
   error?: string;
@@ -555,6 +556,7 @@ export function countScheduleRunHistory(
   const counts: Record<ScheduleRunOutcome, number> = {
     model_dispatched: 0,
     precondition_skipped: 0,
+    calendar_skipped: 0,
     error: 0,
   };
   for (const log of logs) counts[log.outcome] += 1;
@@ -600,7 +602,7 @@ export function scheduleRunTargetResults(value: unknown): ScheduleTargetRunResul
 }
 
 function isScheduleRunOutcome(value: unknown): value is ScheduleRunOutcome {
-  return value === 'model_dispatched' || value === 'precondition_skipped' || value === 'error';
+  return value === 'model_dispatched' || value === 'precondition_skipped' || value === 'calendar_skipped' || value === 'error';
 }
 
 async function fetchScheduleRunHistoryPreview(
@@ -784,11 +786,13 @@ function ScheduleRunLogDialog(props: {
 
   function outcomeLabel(outcome: ScheduleRunLogEntry['outcome']): string {
     if (outcome === 'model_dispatched') return tr('schedules.logs.outcomeDispatched');
+    if (outcome === 'calendar_skipped') return tr('schedules.logs.outcomeCalendarSkipped');
     if (outcome === 'precondition_skipped') return tr('schedules.logs.outcomeSkipped');
     return tr('schedules.logs.outcomeError');
   }
 
   function preconditionLabel(precondition: ScheduleRunLogEntry['precondition']): string {
+    if (precondition === 'not_checked') return tr('schedules.logs.preconditionNotChecked');
     if (precondition === 'none') return tr('schedules.logs.preconditionNone');
     if (precondition === 'disabled') return tr('schedules.logs.preconditionDisabled');
     if (precondition === 'passed') return tr('schedules.logs.preconditionPassed');
@@ -917,6 +921,7 @@ function ScheduleRunLogDialog(props: {
                         {outcomeLabel(selected.outcome)}
                       </strong>
                     </header>
+                    {selected.calendarCheck ? <p>{tr('schedules.form.calendar')}: {selected.calendarCheck.calendar} · {selected.calendarCheck.date} · {selected.calendarCheck.timeZone} · {tr(`schedules.calendarReason.${selected.calendarCheck.reason}`)}</p> : null}
                     <dl className="schedule-run-log-facts">
                       <div>
                         <dt>{tr('schedules.logs.trigger')}</dt>
@@ -1105,7 +1110,7 @@ function scheduleRunHistoryLabel(
     shown: displayed.length,
     total: preview.total,
     dispatched: counts.model_dispatched,
-    skipped: counts.precondition_skipped,
+    skipped: counts.precondition_skipped + counts.calendar_skipped,
     failed: counts.error,
   });
 }
@@ -1246,6 +1251,7 @@ function ScheduleRowCard(props: {
                 : tr('schedules.precondition')}
             </span>
           ) : null}
+          {s.calendar ? <span>{tr('schedules.form.calendar')}: {s.calendar} · {tr('schedules.calendarNext')}: {fmtScheduleDate(s.nextEligibleRunAt, scheduleTimeZone)} · {s.calendarCheck?.reason ? tr(`schedules.calendarReason.${s.calendarCheck.reason}`) : ''}</span> : null}
           <span>{tr('schedules.next')}: {fmtScheduleDate(s.nextRunAt, scheduleTimeZone)}</span>
           <span>{tr('schedules.last')}: {fmtScheduleDate(s.lastRunAt, scheduleTimeZone)}</span>
           {repeat !== null ? <span>{tr('schedules.repeat')}: {repeat}</span> : null}
@@ -1434,7 +1440,7 @@ function SchedulesPage() {
     topicTitle: string;
     updateExecutionPosition: boolean;
     chatIds: string[]; larkAppId: string;
-    model: string; reasoningEffort: string;
+    model: string; reasoningEffort: string; calendar: string;
   }): Promise<void> {
     setFormError(null);
     try {
@@ -1469,6 +1475,7 @@ function SchedulesPage() {
             } : {}),
             // Always submitted, including empty: on the update path an empty
             // string is how the form clears an override back to the bot's.
+            calendar: data.calendar || null,
             model: data.model,
             reasoningEffort: data.reasoningEffort,
           }
@@ -1491,6 +1498,7 @@ function SchedulesPage() {
             topicTitle: data.topicTitle,
             chatIds: data.chatIds,
             larkAppId: data.larkAppId,
+            calendar: data.calendar || null,
             model: data.model,
             reasoningEffort: data.reasoningEffort,
           };
@@ -1698,6 +1706,7 @@ interface ScheduleFormData {
   larkAppId: string;
   /** Per-task model / effort. `''` means "use the bot's configuration". */
   model: string;
+  calendar: string;
   reasoningEffort: string;
 }
 
@@ -1738,6 +1747,7 @@ export function ScheduleFormModal(props: {
   const preconditionTestRunningRef = useRef(false);
   const preconditionTestRevisionRef = useRef(0);
   const [silent, setSilent] = useState(editing?.silent === true);
+  const [calendar, setCalendar] = useState(editing?.calendar ?? '');
   const [model, setModel] = useState(editing?.model ?? '');
   const [reasoningEffort, setReasoningEffort] = useState<string>(editing?.reasoningEffort ?? '');
   const [executionPosition, setExecutionPosition] = useState<'top-level' | 'topic' | 'new-topic' | 'task'>(
@@ -2106,6 +2116,7 @@ export function ScheduleFormModal(props: {
       updateExecutionPosition: !localDelivery,
       chatIds,
       larkAppId,
+      calendar: calendar.trim(),
       model: model.trim(),
       reasoningEffort,
     });
@@ -2712,6 +2723,11 @@ export function ScheduleFormModal(props: {
         {executionPosition === 'new-topic' && silent ? (
           <p className="schedule-form-help">{tr('schedules.form.silentNewTopicConflict')}</p>
         ) : null}
+        <label className="schedule-form-field">
+          <span className="schedule-form-label">{tr('schedules.form.calendar')}</span>
+          <input value={calendar} onChange={e => setCalendar(e.target.value)} placeholder="team-work" />
+          <small className="schedule-form-help">{tr('schedules.form.calendarHelp')}</small>
+        </label>
         <label className="schedule-form-field">
           <span className="schedule-form-label">{tr('schedules.form.model')}</span>
           <input

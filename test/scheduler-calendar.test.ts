@@ -1,0 +1,190 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { config } from '../src/config.js';
+import { dashboardEventBus, type DashboardEvent } from '../src/core/dashboard-events.js';
+import { createTaskWithOptionalPrecondition } from '../src/core/schedule-precondition-config.js';
+import { addTask, updateTask as editTask, runNow, setExecuteCallback, setOwnerFilter, startScheduler, stopScheduler } from '../src/core/scheduler.js';
+import { executeScheduledTaskWithPrecondition } from '../src/services/schedule-precondition-gate.js';
+import { readSchedulePreconditionFile } from '../src/services/schedule-precondition-file.js';
+import { resolveSchedulePrecondition } from '../src/services/schedule-precondition-store.js';
+import { getScheduleScope, getTask, importTasks, requestRunNow, scheduleFilePathFor, setScheduleScope, updateTask } from '../src/services/schedule-store.js';
+import { queryScheduleRunLogs } from '../src/services/schedule-run-log-store.js';
+import { workCalendarPath } from '../src/services/work-calendar.js';
+import { emitHookEvent } from '../src/services/hook-runner.js';
+import type { ScheduledTask } from '../src/types.js';
+
+vi.mock('../src/services/hook-runner.js', () => ({ emitHookEvent: vi.fn() }));
+const APP = 'calendar_scheduler_test';
+const OTHER = 'calendar_scheduler_other';
+const fixture = JSON.parse(readFileSync(new URL('./fixtures/work-calendar/demo.json', import.meta.url), 'utf8'));
+let root: string;
+let previousDataDir: string;
+let previousScope: string | null;
+let events: DashboardEvent[];
+let unsubscribe: () => void;
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2028-01-04T01:00:00Z'));
+  vi.stubEnv('BOTMUX_SCHEDULE_TIMEZONE', 'Asia/Shanghai');
+  vi.clearAllMocks();
+  root = mkdtempSync(join(tmpdir(), 'botmux-calendar-scheduler-'));
+  previousDataDir = config.session.dataDir;
+  previousScope = getScheduleScope();
+  config.session.dataDir = join(root, 'data');
+  setScheduleScope(APP);
+  setOwnerFilter(APP, true);
+  const file = workCalendarPath(APP);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(fixture));
+  events = [];
+  unsubscribe = dashboardEventBus.subscribe(event => events.push(event));
+});
+afterEach(() => {
+  stopScheduler();
+  unsubscribe();
+  vi.clearAllTimers();
+  setExecuteCallback(async () => undefined);
+  config.session.dataDir = previousDataDir;
+  setScheduleScope(previousScope ?? APP);
+  vi.useRealTimers();
+  vi.unstubAllEnvs();
+  rmSync(root, { recursive: true, force: true });
+});
+function create(calendar: string | null = 'demo', extra: Partial<Parameters<typeof addTask>[0]> = {}) {
+  return createTaskWithOptionalPrecondition({
+    name: 'fixture calendar task', schedule: 'every 1m', prompt: 'fixture prompt',
+    workingDir: root, chatId: 'fixture_chat', larkAppId: APP, calendar: calendar ?? undefined,
+    repeat: { times: 3, completed: 0 }, ...extra,
+  }, APP, { enabled: true, source: { kind: 'inline', script: 'printf 1' } });
+}
+function installGate() {
+  const model = vi.fn(async () => undefined);
+  const bash = vi.fn(async () => {
+    writeFileSync(join(root, 'side-effect'), 'called');
+    return { decision: 'pass' as const };
+  });
+  const execute = vi.fn(async (task: ScheduledTask) => executeScheduledTaskWithPrecondition(task, APP, model, {
+    resolve: resolveSchedulePrecondition, readFile: readSchedulePreconditionFile, run: bash,
+  }));
+  setExecuteCallback(execute);
+  return { model, bash, execute };
+}
+async function advance(ms = 60_000) { await vi.advanceTimersByTimeAsync(ms); }
+function snapshot(id: string) { return JSON.parse(readFileSync(scheduleFilePathFor(APP), 'utf8'))[id]; }
+
+describe('calendar admission before task side effects', () => {
+  it('skips before Bash/model, preserves repeat/follow-active/multi-chat and records a non-failure reason', async () => {
+    const task = create('demo', { chatIds: ['fixture_chat', 'fixture_chat_2'], executionPosition: 'new-topic' });
+    const gate = installGate();
+    startScheduler();
+    await advance(180_000);
+    expect(gate.execute).not.toHaveBeenCalled();
+    expect(gate.bash).not.toHaveBeenCalled();
+    expect(gate.model).not.toHaveBeenCalled();
+    expect(existsSync(join(root, 'side-effect'))).toBe(false);
+    expect(snapshot(task.id)).toMatchObject({
+      calendar: 'demo', lastStatus: 'skipped', enabled: true,
+      chatIds: ['fixture_chat', 'fixture_chat_2'], executionPosition: 'new-topic',
+      repeat: { times: 3, completed: 0 },
+      lastCalendarCheck: { reason: 'rest_date', date: '2028-01-04' },
+    });
+    expect(snapshot(task.id).lastError).toBeUndefined();
+    expect(queryScheduleRunLogs(task.id, {}, APP).logs).toHaveLength(3);
+    expect(queryScheduleRunLogs(task.id, {}, APP).logs[0]).toMatchObject({
+      outcome: 'calendar_skipped', precondition: 'not_checked', calendarCheck: { reason: 'rest_date' },
+    });
+    expect(events.filter(e => e.type === 'schedule.fired')).toHaveLength(3);
+    expect(vi.mocked(emitHookEvent).mock.calls.filter(([name]) => name === 'schedule.fired').map(([, value]) => value.status))
+      .toEqual(['skipped', 'skipped', 'skipped']);
+  });
+  it.each(['2028-01-03T01:00:00Z', '2028-01-08T01:00:00Z'])('allows the normal/makeup workday %s', async now => {
+    vi.setSystemTime(new Date(now));
+    const task = create('demo', { executionPosition: 'topic', rootMessageId: 'fixture_root', followActive: true });
+    const gate = installGate();
+    startScheduler();
+    await advance();
+    expect(gate.bash).toHaveBeenCalledTimes(1);
+    expect(gate.model).toHaveBeenCalledTimes(1);
+    expect(getTask(task.id)).toMatchObject({ lastStatus: 'ok', followActive: true, rootMessageId: 'fixture_root', repeat: { completed: 1 } });
+  });
+  it.each(['missing', 'broken', 'coverage'])('blocks %s data without consuming runs and lets unbound tasks run', async kind => {
+    const guarded = create(kind === 'missing' ? 'absent' : 'demo');
+    const legacy = create(null);
+    if (kind === 'broken') writeFileSync(workCalendarPath(APP), '{}');
+    if (kind === 'coverage') vi.setSystemTime(new Date('2029-01-01T01:00:00Z'));
+    const gate = installGate();
+    // Claim both at the current instant, preserving repeat/owner/precondition setup.
+    updateTask(guarded.id, { nextRunAt: new Date().toISOString() });
+    updateTask(legacy.id, { nextRunAt: new Date().toISOString() });
+    startScheduler();
+    await advance(5_000);
+    expect(gate.execute).toHaveBeenCalledTimes(1);
+    expect(gate.execute.mock.calls[0][0].id).toBe(legacy.id);
+    expect(snapshot(guarded.id)).toMatchObject({ enabled: true, lastStatus: 'error', repeat: { completed: 0 } });
+    expect(queryScheduleRunLogs(guarded.id, {}, APP).logs[0]).toMatchObject({ outcome: 'error', errorCode: `calendar_${kind === 'missing' ? 'missing' : kind === 'broken' ? 'invalid' : 'out_of_coverage'}` });
+  });
+  it('keeps bot ownership and profile isolation', async () => {
+    const own = create();
+    setScheduleScope(OTHER);
+    const other = addTask({ name: 'other task', schedule: 'every 1m', prompt: 'fixture', workingDir: root, chatId: 'fixture_chat', larkAppId: OTHER, calendar: 'demo' });
+    setScheduleScope(APP);
+    const gate = installGate();
+    startScheduler();
+    await advance();
+    expect(gate.execute).not.toHaveBeenCalled();
+    expect(getTask(own.id)?.lastStatus).toBe('skipped');
+    expect(getTask(other.id, OTHER)?.lastStatus).toBeUndefined();
+  });
+  it('persists the binding through scheduler restart and profile updates take effect without daemon restart', async () => {
+    const task = create();
+    const gate = installGate();
+    startScheduler();
+    await advance();
+    stopScheduler();
+    vi.clearAllTimers();
+    vi.setSystemTime(new Date('2028-01-04T01:01:00Z'));
+    const persisted = snapshot(task.id);
+    // Reload the JSON row through the migration path into a fresh store/bot home.
+    const freshRoot = join(root, 'restarted');
+    config.session.dataDir = join(freshRoot, 'data');
+    importTasks(APP, [[task.id, persisted]]);
+    const file = workCalendarPath(APP);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ version: 1, calendars: { demo: { ...fixture.calendars.demo, restDates: [], workDates: [] } } }));
+    startScheduler();
+    // The protected sidecar is intentionally absent in the fresh home; use the
+    // dispatcher spy here to inspect calendar admission independently of Bash.
+    const restarted = vi.fn(async () => undefined);
+    setExecuteCallback(restarted);
+    await advance();
+    expect(getTask(task.id)?.calendar).toBe('demo');
+    expect(restarted).toHaveBeenCalledTimes(1);
+  });
+  it.each(['dashboard', 'cli'])('manual %s run bypasses even missing calendars', async trigger => {
+    const task = create('absent');
+    const gate = installGate();
+    if (trigger === 'dashboard') {
+      expect(runNow(task.id)).toEqual({ ok: true });
+      await advance(0);
+    } else {
+      expect(requestRunNow(task.id)).toEqual({ ok: true });
+      // Durable manual intent survives JSON migration/restart.
+      expect(snapshot(task.id).manualRunRequested).toBe(true);
+      startScheduler();
+      await advance(5_000);
+    }
+    expect(gate.bash).toHaveBeenCalledTimes(1);
+    expect(gate.model).toHaveBeenCalledTimes(1);
+    expect(snapshot(task.id)).toMatchObject({ lastStatus: 'ok', lastCalendarCheck: { reason: 'manual_bypass' } });
+    expect(snapshot(task.id).manualRunRequested).toBeUndefined();
+  });
+  it('rejects once binding on create/update while preserving legacy once', () => {
+    expect(() => create('demo', { schedule: '30m' })).toThrow('calendar_once_unsupported');
+    const task = create(null, { schedule: '30m' });
+    expect(editTask(task.id, { calendar: 'demo' })).toEqual({ ok: false, error: 'calendar_once_unsupported' });
+    expect(getTask(task.id)?.calendar).toBeUndefined();
+  });
+});

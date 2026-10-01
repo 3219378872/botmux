@@ -152,6 +152,7 @@ describe('dashboard schedules React page helpers', () => {
     expect(countScheduleRunHistory(newestFirst)).toEqual({
       model_dispatched: 1,
       precondition_skipped: 1,
+      calendar_skipped: 0,
       error: 1,
     });
 
