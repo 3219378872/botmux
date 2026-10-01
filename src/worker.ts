@@ -1652,10 +1652,28 @@ let tmuxRestartTimer: NodeJS.Timeout | null = null;
  *  lifecycle so a 4× crash loop does not spam the Lark thread with 4 copies
  *  of the same warning. */
 let resumeFallbackNotified = false;
-/** True once the claude-family transcript bridge has SEEN the CLI session's
- *  JSONL file exist (at attach, or lazily on first appearance). A first-turn
- *  launch that dies before the CLI writes anything leaves no user-visible
- *  history; its resume-fallback is a recovery detail, not context loss. */
+/** True once the claude-family transcript bridge has evidence that the CLI
+ *  session produced user-visible history. Two setters, covering every bridge
+ *  mode:
+ *    - `bridgeAbsorbBaseline()` — attach/lazy-baseline/restart-resume modes,
+ *      where the JSONL already exists when baselined;
+ *    - the `bridgeIngest()` drain — fresh-empty mode never runs a baseline
+ *      (its file is created by the CLI's first submit), so the flag arms on
+ *      the first drained transcript event instead.
+ *  A launch that dies before the CLI writes anything leaves no user-visible
+ *  history; its resume-fallback is a recovery detail, not context loss.
+ *
+ *  Cross-process trade-off (deliberate): the flag is NOT persisted — a worker
+ *  restart resets it to false. Persisting it would risk a stale `true`
+ *  suppressing the fallback notice for a session whose transcript is actually
+ *  gone (a false "nothing was lost" silence); resetting errs the other way —
+ *  at worst we MISS one reminder that history would not carry over. The miss
+ *  window is small: when the daemon rebuilds a worker for a session whose
+ *  transcript still exists, the resume path baselines that file via
+ *  `bridgeAbsorbBaseline()` and re-arms the flag before any fallback could
+ *  fire, so only "worker restart AND transcript already gone" can slip
+ *  through — which is exactly the case the tier-1 probe is about to
+ *  re-derive anyway — 宁可漏发一次提醒，也不误发。 */
 let cliTranscriptEverExisted = false;
 /** Skill catalog to attach to the first user turn after a prompt-less CLI restart. */
 let deferredPluginSkillCatalog: string | null = null;
@@ -5457,9 +5475,10 @@ function scheduleHerdrAdoptBridgeQuietEmit(): void {
 function bridgeAbsorbBaseline(): void {
   if (!bridgeJsonlPath) return;
   // The transcript file exists (or just appeared): this CLI session HAS
-  // user-visible history. Recorded here so the resume-fallback notice can
-  // distinguish real context loss from a first-turn launch that died before
-  // the CLI ever wrote its session file.
+  // user-visible history. Recorded here (attach/lazy-baseline modes; the
+  // other setter is the fresh-empty first-drain in bridgeIngest) so the
+  // resume-fallback notice can distinguish real context loss from a
+  // first-turn launch that died before the CLI ever wrote its session file.
   cliTranscriptEverExisted = true;
   if (!lastInitConfig?.adoptMode) {
     // Restart recovery: if the previous generation left pending Lark turns in
@@ -6178,7 +6197,20 @@ function bridgeIngest(): void {
   const result = drainTranscript(bridgeJsonlPath, bridgeOffset);
   bridgeOffset = result.newOffset;
   bridgePendingTail = result.pendingTail;
-  if (result.events.length > 0) lastStructuredBridgeActivityAtMs = Date.now();
+  if (result.events.length > 0) {
+    lastStructuredBridgeActivityAtMs = Date.now();
+    // First drained event = the CLI session now holds user-visible history.
+    // bridgeAbsorbBaseline() (the flag's original setter) never runs in
+    // fresh-empty mode — that mode declares baseline-done up front so the
+    // first turn stays attributable — so without this, a fresh session that
+    // ran real turns would keep `cliTranscriptEverExisted === false` and a
+    // later resume fallback would silently drop its context without the
+    // user-facing notice. For attach/lazy-baseline modes this is a no-op:
+    // the flag was already set at baseline. Chosen over comment-only
+    // narrowing because the flag's name and consumer both mean "history
+    // exists", which this makes true in every mode.
+    cliTranscriptEverExisted = true;
+  }
   bridgeQueue.ingest(result.events, bridgeJsonlPath, observeThinkingAttribution);
   // Fold background Agent/Task dispatch and their `<task-notification>`
   // completions so the idle edge (markPromptReady) knows whether this turn is
