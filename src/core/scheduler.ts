@@ -534,8 +534,9 @@ async function tick(): Promise<void> {
     const nextMs = new Date(nextRunAt).getTime();
     if (nextMs > now) continue;
 
-    // Recurring: fast-forward if stale beyond grace window
-    if (task.parsed.kind !== 'once') {
+    // Fast-forward stale automatic occurrences. A durable manual request must
+    // reach claimRun, which consumes it, instead of leaking into a future tick.
+    if (task.parsed.kind !== 'once' && !task.manualRunRequested) {
       const grace = computeGraceSeconds(task.parsed);
       if ((now - nextMs) / 1000 > grace) {
         const newNext = computeNextRun(task.parsed, new Date(now).toISOString());

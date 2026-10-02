@@ -235,6 +235,63 @@ describe('calendar admission before task side effects', () => {
     expect(gate.model).toHaveBeenCalledTimes(1);
     expect(snapshot(task.id).manualRunRequested).toBeUndefined();
   });
+  it.each([
+    ['cron', '0 9 * * *', '2026-09-30T04:00:00Z', '2026-09-30T09:00:00Z', '2026-10-01T01:00:00Z'],
+    ['interval', 'every 1m', '2026-10-01T00:55:00Z', '2026-10-01T01:00:00Z', '2026-10-01T01:01:05Z'],
+  ])('consumes a %s manual request after downtime beyond grace without bypassing the next automatic rest-day run', async (_kind, schedule, requestedAt, restartedAt, automaticAt) => {
+    vi.setSystemTime(new Date(requestedAt));
+    const task = addTask({ name: 'durable manual request', schedule, prompt: 'fixture',
+      workingDir: root, chatId: 'fixture_chat', larkAppId: APP, calendar: 'cn',
+      repeat: { times: 3, completed: 0 } });
+    const execute = vi.fn(async () => undefined);
+    setExecuteCallback(execute);
+    startScheduler();
+    expect(requestRunNow(task.id)).toEqual({ ok: true });
+    stopScheduler();
+    vi.clearAllTimers();
+    const persisted = snapshot(task.id);
+    expect(persisted.manualRunRequested).toBe(true);
+    // Reload persisted intent into a fresh store/home, as on daemon restart.
+    config.session.dataDir = join(root, 'restarted-manual', 'data');
+    importTasks(APP, [[task.id, persisted]]);
+    vi.setSystemTime(new Date(restartedAt));
+    startScheduler();
+    await advance(5_000);
+    await vi.waitFor(() => expect(snapshot(task.id)).toMatchObject({
+      lastStatus: 'ok', lastCalendarCheck: { reason: 'manual_bypass' }, repeat: { completed: 1 },
+    }));
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(snapshot(task.id).manualRunRequested).toBeUndefined();
+    expect(snapshot(task.id).nextRunAt).toBe(new Date(automaticAt).toISOString());
+    // Let the actual persisted next occurrence become due on a confirmed CN rest day.
+    stopScheduler();
+    vi.clearAllTimers();
+    vi.setSystemTime(new Date(Date.parse(automaticAt) - 5_000));
+    startScheduler();
+    await advance(5_000);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(snapshot(task.id)).toMatchObject({ lastStatus: 'skipped',
+      lastCalendarCheck: { reason: 'rest_date', matches: false }, repeat: { completed: 1 } });
+    expect(snapshot(task.id).manualRunRequested).toBeUndefined();
+    expect(queryScheduleRunLogs(task.id, {}, APP).logs[0]).toMatchObject({
+      trigger: 'scheduler', outcome: 'calendar_skipped', calendarCheck: { reason: 'rest_date' },
+    });
+  });
+  it.each(['0 9 * * *', 'every 1m'])('still fast-forwards a stale automatic occurrence for %s', async schedule => {
+    vi.setSystemTime(new Date('2026-09-30T04:00:00Z'));
+    const task = addTask({ name: 'stale automatic task', schedule, prompt: 'fixture',
+      workingDir: root, chatId: 'fixture_chat', larkAppId: APP });
+    updateTask(task.id, { nextRunAt: new Date().toISOString() });
+    const execute = vi.fn(async () => undefined);
+    setExecuteCallback(execute);
+    vi.setSystemTime(new Date('2026-09-30T09:00:00Z'));
+    startScheduler();
+    await advance(5_000);
+    expect(execute).not.toHaveBeenCalled();
+    expect(Date.parse(snapshot(task.id).nextRunAt)).toBeGreaterThan(Date.now());
+    expect(snapshot(task.id).lastRunAt).toBeUndefined();
+    expect(snapshot(task.id).manualRunRequested).toBeUndefined();
+  });
   it('rejects once binding on create/update while preserving legacy once', () => {
     expect(() => create('demo', { schedule: '30m' })).toThrow('calendar_once_unsupported');
     const task = create(null, { schedule: '30m' });

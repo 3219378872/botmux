@@ -301,7 +301,7 @@ Dashboard 的“自定义工作日历”区域通过下拉框选择日历，内�
 | 自动 cron | 在执行入口判断实际当地日期；只有所选的工作日或休息日允许执行，其他日期跳过，继续等待原 cron 的下一次候选 |
 | 自动 interval | 同样过滤；跳过后继续原 interval 调度，不累积补跑；预览从当前计划保持间隔相位 |
 | once | 本 MVP 不支持绑定；创建或更新时拒绝，损坏/外部写入的 once 绑定也不会自动执行 |
-| Dashboard“立即执行” / `schedule run` | 显式手动执行绕过日历，保留原有 precondition 和执行规则；记录 `manual_bypass`。CLI 请求意图持久化并由所属 Bot 消费 |
+| Dashboard“立即执行” / `schedule run` | 显式手动执行绕过日历，保留原有 precondition 和执行规则；记录 `manual_bypass`。CLI 请求意图持久化并由所属 Bot 消费；停机超过补偿窗口后重启仍执行一次并消费意图，后续自动到期重新检查日历 |
 
 自动判断先于可能产生宿主副作用的 Bash precondition、模型调用、话题创建和消息通知。不符合所选日期类型时记录 `lastStatus: skipped`、执行日志 `calendar_skipped`、`schedule.fired` hook 的 `status: skipped`，不会被计作执行失败，也不消耗有限重复次数。日历缺失、损坏、Bot scope 缺失或日期超覆盖时不执行，记录错误原因，不扣重复次数、不自动禁用任务；修复数据后可在后续候选继续执行。未绑定任务不受这些错误影响。
 
