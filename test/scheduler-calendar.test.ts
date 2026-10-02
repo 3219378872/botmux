@@ -353,6 +353,43 @@ describe('calendar admission before task side effects', () => {
     expect(gate.model).toHaveBeenCalledTimes(1);
     expect(snapshot(task.id).manualRunRequested).toBeUndefined();
   });
+  it('cancels pending manual intent when a changed schedule next fires on a rest day', async () => {
+    vi.setSystemTime(new Date('2026-09-30T04:00:00Z'));
+    const task = addTask({ name: 'edit pending manual task', schedule: '0 9 * * 1', prompt: 'fixture',
+      workingDir: root, chatId: 'fixture_chat', larkAppId: APP, calendar: 'cn',
+      repeat: { times: 3, completed: 0 } });
+    const execute = vi.fn(async () => undefined);
+    setExecuteCallback(execute);
+    expect(requestRunNow(task.id)).toEqual({ ok: true });
+    expect(snapshot(task.id).manualRunRequested).toBe(true);
+    expect(editTask(task.id, { schedule: '0 9 * * *' })).toEqual({ ok: true });
+    expect(snapshot(task.id).manualRunRequested).toBeUndefined();
+    expect(snapshot(task.id).nextRunAt).toBe('2026-10-01T01:00:00.000Z');
+    vi.setSystemTime(new Date('2026-10-01T00:59:55Z'));
+    startScheduler();
+    await advance(5_000);
+    expect(execute).not.toHaveBeenCalled();
+    expect(snapshot(task.id)).toMatchObject({ lastStatus: 'skipped',
+      lastCalendarCheck: { reason: 'rest_date', matches: false }, repeat: { completed: 0 } });
+    expect(queryScheduleRunLogs(task.id, {}, APP).logs[0]).toMatchObject({
+      trigger: 'scheduler', outcome: 'calendar_skipped', calendarCheck: { reason: 'rest_date' },
+    });
+  });
+  it('preserves a valid pending manual request when editing without changing its schedule', async () => {
+    const task = addTask({ name: 'edit pending label', schedule: 'every 1m', prompt: 'fixture',
+      workingDir: root, chatId: 'fixture_chat', larkAppId: APP, calendar: 'absent' });
+    const execute = vi.fn(async () => undefined);
+    setExecuteCallback(execute);
+    expect(requestRunNow(task.id)).toEqual({ ok: true });
+    const pendingAt = snapshot(task.id).nextRunAt;
+    expect(editTask(task.id, { name: 'updated label', schedule: task.schedule })).toEqual({ ok: true });
+    expect(snapshot(task.id)).toMatchObject({ manualRunRequested: true, nextRunAt: pendingAt });
+    startScheduler();
+    await advance(5_000);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(snapshot(task.id).manualRunRequested).toBeUndefined();
+    expect(snapshot(task.id).lastCalendarCheck.reason).toBe('manual_bypass');
+  });
   it('rejects once binding on create/update while preserving legacy once', () => {
     expect(() => create('demo', { schedule: '30m' })).toThrow('calendar_once_unsupported');
     const task = create(null, { schedule: '30m' });

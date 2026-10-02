@@ -1239,6 +1239,7 @@ export function updateTask(
     patch.parsed = parsed;
     const next = computeNextRun(parsed);
     patch.nextRunAt = next ?? undefined;
+    patch.manualRunRequested = undefined;
   }
 
   if (!scheduleStore.updateTask(id, patch)) return { ok: false, error: 'not_found' };
