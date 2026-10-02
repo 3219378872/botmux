@@ -6,6 +6,7 @@ import * as pty from 'node-pty';
 import xtermHeadless from '@xterm/headless';
 import type { BackendType, SessionBackend, SpawnOpts, SessionProbe } from './types.js';
 import { logger } from '../../utils/logger.js';
+import { herdrExecutable } from '../../utils/herdr-executable.js';
 
 const { Terminal } = xtermHeadless;
 
@@ -96,7 +97,7 @@ export interface HerdrWebTerminalCursor {
 
 function tryJsonCommand(args: string[], opts?: { timeout?: number; input?: string; env?: NodeJS.ProcessEnv }): JsonCommandResult {
   try {
-    const out = execFileSync('herdr', args, {
+    const out = execFileSync(herdrExecutable(), args, {
       encoding: 'utf-8',
       input: opts?.input,
       stdio: opts?.input === undefined ? ['ignore', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'],
@@ -132,7 +133,7 @@ function requiredJsonCommand(
 ): any {
   let raw = '';
   try {
-    raw = execFileSync('herdr', args, {
+    raw = execFileSync(herdrExecutable(), args, {
       encoding: 'utf-8',
       input: opts?.input,
       stdio: opts?.input === undefined ? ['ignore', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'],
@@ -166,7 +167,7 @@ function requiredJsonCommand(
 
 function herdrUsesManagedAgentFacade(): boolean {
   try {
-    const out = execFileSync('herdr', ['--version'], {
+    const out = execFileSync(herdrExecutable(), ['--version'], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 3000,
@@ -258,7 +259,7 @@ function sharedServerEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 function runHerdr(args: string[], opts?: { timeout?: number; input?: string }): boolean {
   try {
-    execFileSync('herdr', args, {
+    execFileSync(herdrExecutable(), args, {
       input: opts?.input,
       stdio: opts?.input === undefined ? 'ignore' : ['pipe', 'ignore', 'ignore'],
       timeout: opts?.timeout ?? 5000,
@@ -309,7 +310,7 @@ function extractReadText(raw: any): string {
  */
 function readHerdrTextCommand(args: string[]): string {
   try {
-    const raw = execFileSync('herdr', args, {
+    const raw = execFileSync(herdrExecutable(), args, {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 5000,
@@ -389,7 +390,7 @@ export class HerdrBackend implements SessionBackend {
 
   static isAvailable(): boolean {
     try {
-      execFileSync('herdr', ['--version'], { stdio: 'ignore', timeout: 3000 });
+      execFileSync(herdrExecutable(), ['--version'], { stdio: 'ignore', timeout: 3000 });
       return true;
     } catch {
       return false;
@@ -765,7 +766,7 @@ export class HerdrBackend implements SessionBackend {
     const serverEnv = this.opts.ownsSession === false
       ? sharedServerEnv(process.env)
       : this.childEnv;
-    this.serverProcess = spawn('herdr', ['--session', this.sessionName, 'server'], {
+    this.serverProcess = spawn(herdrExecutable(), ['--session', this.sessionName, 'server'], {
       stdio: 'ignore',
       detached: true,
       env: serverEnv,
@@ -895,7 +896,7 @@ export class HerdrBackend implements SessionBackend {
       allowProposedApi: true,
     });
     try {
-      const attach = pty.spawn('herdr', [
+      const attach = pty.spawn(herdrExecutable(), [
         '--session', this.sessionName,
         'agent', 'attach', target,
       ], {
@@ -1115,7 +1116,7 @@ export class HerdrBackend implements SessionBackend {
     const armedAt = Date.now();
     for (const status of WATCHED_STATUSES) {
       if (status === currentStatus) continue;
-      const child = spawn('herdr', [
+      const child = spawn(herdrExecutable(), [
         '--session', this.sessionName,
         'wait', 'agent-status', paneTarget,
         '--status', status,
