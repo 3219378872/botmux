@@ -333,6 +333,26 @@ describe('calendar admission before task side effects', () => {
     expect(gate.model).toHaveBeenCalledTimes(1);
     expect(snapshot(task.id).manualRunRequested).toBeUndefined();
   });
+  it.each(['dashboard', 'cli'])('drops legacy paused manual intent when resumed through %s', entry => {
+    const task = create();
+    updateTask(task.id, { enabled: false, disabledReason: 'manual', manualRunRequested: true });
+    if (entry === 'dashboard') expect(setEnabled(task.id, true)).toEqual({ ok: true });
+    else expect(enableTask(task.id)).toBe(true);
+    expect(snapshot(task.id).manualRunRequested).toBeUndefined();
+  });
+  it('does not defer a valid pending request when CLI resume is repeated on an enabled task', async () => {
+    const task = create('absent');
+    const gate = installGate();
+    expect(requestRunNow(task.id)).toEqual({ ok: true });
+    const pending = snapshot(task.id);
+    expect(enableTask(task.id)).toBe(true);
+    expect(snapshot(task.id)).toEqual(pending);
+    startScheduler();
+    await advance(5_000);
+    await vi.waitFor(() => expect(snapshot(task.id).lastStatus).toBe('ok'));
+    expect(gate.model).toHaveBeenCalledTimes(1);
+    expect(snapshot(task.id).manualRunRequested).toBeUndefined();
+  });
   it('rejects once binding on create/update while preserving legacy once', () => {
     expect(() => create('demo', { schedule: '30m' })).toThrow('calendar_once_unsupported');
     const task = create(null, { schedule: '30m' });

@@ -877,9 +877,11 @@ export function removeTask(id: string): boolean {
 export function enableTask(id: string): boolean {
   const task = scheduleStore.getTask(id);
   if (!task) return false;
+  // Repeating resume must not move a pending manual request to a future tick.
+  if (task.enabled && task.manualRunRequested) return true;
   const next = computeNextRun(task.parsed);
   scheduleStore.updateTask(id, {
-    enabled: true, disabledReason: undefined, nextRunAt: next ?? undefined,
+    enabled: true, disabledReason: undefined, nextRunAt: next ?? undefined, manualRunRequested: undefined,
   });
   return true;
 }
@@ -969,7 +971,7 @@ export function setEnabled(id: string, enabled: boolean): { ok: boolean; error?:
   if (enabled) {
     const next = computeNextRun(task.parsed);
     scheduleStore.updateTask(id, {
-      enabled: true, disabledReason: undefined, nextRunAt: next ?? undefined,
+      enabled: true, disabledReason: undefined, nextRunAt: next ?? undefined, manualRunRequested: undefined,
     });
   } else {
     scheduleStore.updateTask(id, { enabled: false, disabledReason: 'manual', manualRunRequested: undefined });
