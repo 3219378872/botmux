@@ -35,6 +35,13 @@ interface HerdrBackendOptions {
 // every idle/working/blocked transition. The 500ms timer is a fallback for the
 // in-the-middle-of-working case where output streams without a status flip.
 const POLL_INTERVAL_MS = 500;
+// An unchanged pane backs the poll off by doubling up to IDLE_POLL_MAX_MS, so
+// idle topics stop costing two Herdr CLI processes (list + 10k-line read) every
+// 0.5 s. New output, input sent to the pane, or a status transition returns to
+// POLL_INTERVAL_MS at once. Exit stays prompt while backed off: the status
+// watcher's `wait` returns immediately once the agent's pane is gone.
+const IDLE_POLLS_BEFORE_BACKOFF = 6;
+const IDLE_POLL_MAX_MS = 5_000;
 const READ_LINES = 10_000;
 const MAX_AGENT_PROBE_FAILURES = 3;
 // While `agent list` keeps failing (keep-alive), re-confirm liveness through
@@ -340,6 +347,8 @@ function longestSuffixPrefix(previous: string, next: string): number {
 export class HerdrBackend implements SessionBackend {
   private serverProcess: ChildProcess | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
+  private pollDelayMs = POLL_INTERVAL_MS;
+  private unchangedPolls = 0;
   private statusWaitProcesses: ChildProcess[] = [];
   private readonly dataCbs: Array<(d: string) => void> = [];
   private readonly snapshotCbs: Array<(snapshot: string) => void> = [];
@@ -598,6 +607,7 @@ export class HerdrBackend implements SessionBackend {
   }
 
   write(data: string): boolean {
+    this.wakePolling();
     if (this.exited) return false;
     const target = this.paneId ?? this.agentName;
     return runHerdr(
@@ -607,10 +617,12 @@ export class HerdrBackend implements SessionBackend {
   }
 
   sendText(text: string): boolean {
+    this.wakePolling();
     return this.write(text);
   }
 
   sendSpecialKeys(...keys: string[]): boolean {
+    this.wakePolling();
     if (this.exited) return false;
     const target = this.paneId ?? this.agentName;
     return runHerdr(
@@ -996,13 +1008,47 @@ export class HerdrBackend implements SessionBackend {
 
   private startPolling(): void {
     this.stopPolling();
-    this.pollTimer = setInterval(() => this.poll(), POLL_INTERVAL_MS);
-    this.pollTimer.unref?.();
+    this.pollDelayMs = POLL_INTERVAL_MS;
+    this.unchangedPolls = 0;
+    this.schedulePoll();
+  }
+
+  private schedulePoll(): void {
+    if (this.exited) return;
+    const timer = setTimeout(() => {
+      this.pollTimer = null;
+      try {
+        this.poll();
+      } finally {
+        // Keep the chain alive even if poll() throws (setInterval never
+        // stopped on a throwing tick). poll() may already have re-armed
+        // through wakePolling().
+        if (this.pollTimer === null) this.schedulePoll();
+      }
+    }, this.pollDelayMs);
+    timer.unref?.();
+    this.pollTimer = timer;
   }
 
   private stopPolling(): void {
-    if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.pollTimer) clearTimeout(this.pollTimer);
     this.pollTimer = null;
+  }
+
+  /** Return to the fast cadence; a pending backed-off poll is pulled in. */
+  private wakePolling(): void {
+    this.unchangedPolls = 0;
+    if (this.pollDelayMs === POLL_INTERVAL_MS) return;
+    this.pollDelayMs = POLL_INTERVAL_MS;
+    if (this.pollTimer) {
+      this.stopPolling();
+      this.schedulePoll();
+    }
+  }
+
+  private noteUnchangedPoll(): void {
+    if (++this.unchangedPolls < IDLE_POLLS_BEFORE_BACKOFF) return;
+    this.pollDelayMs = Math.min(this.pollDelayMs * 2, IDLE_POLL_MAX_MS);
   }
 
   private poll(): void {
@@ -1075,7 +1121,11 @@ export class HerdrBackend implements SessionBackend {
   private readAndEmitDelta(): void {
     if (this.exited) return;
     const next = this.readRecentAnsi();
-    if (!next || next === this.lastText) return;
+    if (!next || next === this.lastText) {
+      this.noteUnchangedPoll();
+      return;
+    }
+    this.wakePolling();
     for (const cb of this.snapshotCbs) {
       try { cb(next); } catch { /* listener crash shouldn't kill polling */ }
     }
@@ -1141,6 +1191,7 @@ export class HerdrBackend implements SessionBackend {
         // immediately while a status remains current, so including it again is
         // the level-triggered success storm this state machine prevents.
         if (code === 0) {
+          this.wakePolling();
           for (const cb of this.agentStatusCbs) {
             try { cb(status); } catch { /* listener crash shouldn't kill watcher */ }
           }
