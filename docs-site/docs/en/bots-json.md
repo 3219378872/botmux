@@ -451,6 +451,17 @@ The fixed baseline contains PATH, HOME, user identity, temporary directories, st
 
 Set the policy in Dashboard under “Process environment inheritance”, with `botmux env-policy set '{"mode":"strict","inherit":["HTTPS_PROXY"]}'` with --bot to select the target bot, or `/botconfig set envPolicy {"mode":"strict"}`. Unset restores historical inheritance. Malformed policies, unknown fields and reserved names fail closed.
 
+**Combining network policies:** When using a version that provides `sandboxNetworkPolicy`, the `HTTPS_PROXY` example above must also satisfy this table. An exact environment grant controls whether a value reaches the CLI; it does not authorize network access or silently remove/rewrite a proxy.
+
+| Network configuration | HTTP/HTTPS/ALL proxy and lowercase equivalents |
+| --- | --- |
+| No network policy; or omitted `proxyMode` with both zones set to `allow` | No network-policy proxy rejection; strict mode still requires an `inherit` grant or this bot's explicit `env` |
+| Omitted `proxyMode` with either zone set to `block`, `allowlist` or `denylist` | Non-empty proxy values reject launch, including inherited and per-bot configured values |
+| `proxyMode: "reject"` | Non-empty proxy values reject launch even when both zones use `allow` |
+| `proxyMode: "trusted-egress"` | Explicitly granted proxies may remain; rules must permit the actual proxy endpoint IP/port; final model destinations, proxy DNS and CONNECT/HTTP rules belong to deployment-layer proxy ACLs |
+
+`trusted-egress` neither creates a proxy, grants environment variables nor guarantees the CLI uses it. Authorizing an exit does not restrict destinations behind it. If a model requires a proxy, do not simply remove its `inherit` grant to pass validation: explicitly trust the exit and configure endpoint rules plus deployment-layer ACLs, or first establish direct model authentication, permitted destination CIDRs/ports and DNS. Network policies still require Linux, a fresh local PTY and `sandbox: true` / `"oncall"`; persistent backends such as tmux, adopt and external App Servers remain rejected regardless of `trusted-egress` or `envPolicy`. See [network sandbox documentation](sandbox.md).
+
 Online changes apply on the next **worker cold start**. The offline terminal command updates bots.json; an already running daemon must be restarted to reload an offline edit. CLI restarts within a live worker retain its frozen policy. Persistent restore compares a secret-free policy fingerprint: absent, corrupt or mismatched strict generations must terminate with a confirmed missing probe before cold start; unconfirmed teardown refuses launch. Environment already read by a live CLI cannot be revoked through a hot update.
 
 Strict mode covers Botmux-owned PTY, tmux, tmux-pipe, zellij, zmx, local Codex/TraeX RPC App Servers and title subprocesses. tmux/zellij exec `/usr/bin/env -i` directly and skip `launchShell` profiles. zmx uses a fixed shell without user profiles and an empty-environment exec. Supply PATH/nvm/mise configuration explicitly. Shared-server globals are not cleared wholesale; existing mandatory sensitive-variable scrubbing still applies. Strict panes reset inherited environments and granted credentials never seed shared globals. Strict panes default to `TERM=xterm-256color` when it is absent and preserve explicitly configured values. v3 workflows freeze the secret-free policy and resolve per-bot env at execution time rather than persist credentials into bot snapshots.

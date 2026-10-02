@@ -472,6 +472,17 @@ Dashboard 的“会议角色预设”提供本地内置模板库，当前包含�
 
 可在 Dashboard「机器人默认设置 → 进程环境继承」配置，或执行 `botmux env-policy set '{"mode":"strict","inherit":["HTTPS_PROXY"]}'`（用 --bot 选择目标 bot）；会话内也可使用 `/botconfig set envPolicy {"mode":"strict"}`。`unset` 恢复默认继承。格式错误、未知字段和保留变量名会拒绝保存/加载，不静默降级。
 
+**与网络策略组合：** 使用支持 `sandboxNetworkPolicy` 的版本时，上述 `HTTPS_PROXY` 示例还需满足下表。严格继承的精确授权只决定环境值能否到达 CLI，不会替代网络许可，也不会悄悄删除或改写代理。
+
+| 网络配置 | HTTP/HTTPS/ALL proxy 及小写同名项 |
+| --- | --- |
+| 未配置网络策略；或 `proxyMode` 缺省且 `public` / `private` 均为 `allow` | 不因网络策略拒绝；严格模式仍须 `inherit` 获准或本 bot 的 `env` 明确配置 |
+| `proxyMode` 缺省且任一区域为 `block`、`allowlist` 或 `denylist` | 非空代理值会被明确拒绝启动，包括继承和本 bot 的 `env` |
+| `proxyMode: "reject"` | 即使两区均 `allow`，非空代理值也会拒绝启动 |
+| `proxyMode: "trusted-egress"` | 可保留显式获准的代理值；网络规则必须允许客户端实际连接的代理 IP / 端口；最终模型目标、代理端 DNS、CONNECT/HTTP 规则由部署层代理 ACL 控制 |
+
+`trusted-egress` 不创建代理、不自动授权环境变量、不保证 CLI 会使用代理；允许代理出口不等于限制代理后的业务目标。若模型依赖代理，不能只删掉 `inherit` 中的代理名称来让配置通过：应显式选择可信出口并配置出口规则与部署层 ACL，或先准备可直连的模型认证、获准目标 CIDR / 端口和 DNS，再移除代理授权。网络策略仍要求 Linux、新建本地 PTY 及 `sandbox: true` / `"oncall"`；tmux 等持久后端、adopt 和外部 App Server 的拒绝门禁不会因 `trusted-egress` 或 `envPolicy` 放开。详见[网络沙箱说明](sandbox.md)。
+
 在线策略修改在**下次 worker 冷启动**生效；离线终端命令只更新 bots.json，daemon 下次启动时读取。活跃 worker 内的 CLI 重启/自动恢复沿用其已冻结策略。daemon 重启恢复持久 pane 时比较无秘密值的策略指纹；旧 pane 没有严格策略记录、记录损坏或获准列表变化时，先关闭并确认消失再冷启动，确认失败则拒绝启动。CLI 已读取的环境不能被热更新撤回。
 
 严格模式覆盖 Botmux 自己启动的 PTY、tmux、tmux-pipe、zellij、zmx，以及本机 Codex/TraeX RPC App Server 和标题生成子进程。tmux/zellij 不加载 `launchShell` 的启动 profile，而是直接以 `/usr/bin/env -i` 启动 CLI；zmx 使用无 profile 的固定启动 shell 和空环境 exec。PATH/nvm/mise 等须由运行基线或本 bot 的显式配置提供。共享 server 不做全局清空，沿用已有敏感项清理；严格 pane 的 exec 会清空继承，获准凭证也不会写回 server 全局。严格 pane 未提供 `TERM` 时使用 `xterm-256color`，显式配置的值保留。v3 workflow 冻结无秘密的策略并在运行时读取本 bot 配置的 env，不把凭证写入 bot snapshot。
