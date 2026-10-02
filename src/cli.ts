@@ -2639,8 +2639,9 @@ async function cmdStart(): Promise<void> {
   applyCompanionOptions(process.argv.slice(3));
   // `--systemd-service` and the PM2-God ownership gating that used to live here
   // are gone with pm2 itself: the built-in supervisor owns single-owner exclusion
-  // via fleet-state (pid + kill-0 under the fleet mutation lock), so there is no
-  // God process whose cgroup/generation has to be proven before starting.
+  // via fleet-state (liveness check under the fleet mutation lock, completed by
+  // the supervisor's own ownership claim at boot), so there is no God process
+  // whose cgroup/generation has to be proven before starting.
   if (!hasConfig()) {
     console.error('❌ 未找到配置文件');
     console.error('   请先运行: botmux setup');
@@ -2745,7 +2746,10 @@ async function startConfiguredFleet(
       cleanupLegacyPm2();
       // Fleet launch via the built-in supervisor (replaces pm2). The supervisor
       // owns the invariants pm2's guard layer used to enforce: single-supervisor
-      // exclusion (fleet-state pid + kill-0, under this same mutation lock),
+      // exclusion (the liveness check under this mutation lock only covers an
+      // already-recorded supervisor — one spawned moments ago by a concurrent
+      // start hasn't recorded itself yet, so FleetSupervisor.start() atomically
+      // claims fleet-state and the later of two supervisors exits untouched),
       // idempotent reconcile (planStart only (re)spawns missing/dead bots), and
       // projection identity (validated on every state write). So `start` while a
       // live supervisor already owns the fleet is a safe no-op — no pm2-style
