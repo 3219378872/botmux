@@ -373,7 +373,7 @@ keybinds clear-defaults=true {
 
 /** Escape a string for a KDL double-quoted value. */
 export function kdlString(s: string): string {
-  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r')}"`;
 }
 
 /**

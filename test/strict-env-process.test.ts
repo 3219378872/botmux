@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildBotWorkerEnv, buildSessionChildEnv, botInjectedEnv } from '../src/core/env-policy.js';
-import { strictPaneCommand } from '../src/adapters/backend/strict-env.js';
+import { strictPaneCommand, strictPaneEnvArgs } from '../src/adapters/backend/strict-env.js';
 import { buildLayoutString } from '../src/adapters/backend/zellij-backend.js';
 import { buildZmxLaunchFiles } from '../src/adapters/backend/zmx-backend.js';
 import { type SpawnOpts } from '../src/adapters/backend/types.js';
@@ -60,6 +60,23 @@ async function stopBackend(child: ReturnType<typeof spawnNodeTsScript>) {
   });
 }
 describe('strict environment real process probes', () => {
+  it.each([false, true])('provider keys remain only without instance binding (bound=%s)', bound => {
+    const opts = optsFor('/tmp');
+    const provider = { OPENAI_API_KEY: 'inherited-key', CODEX_API_KEY: 'inherited-codex', OPENAI_BASE_URL: 'https://provider.invalid' };
+    Object.assign(opts.env, provider, bound ? { BOTMUX_CODEX_INSTANCE_BINDING: 'binding' } : {});
+    opts.injectEnv = { ...provider, OPENAI_API_KEY: 'bot-key', MODEL_AUTH: 'other-model' };
+    const assignments = strictPaneEnvArgs(opts).slice(1);
+    for (const key of Object.keys(provider)) expect(assignments.some(value => value.startsWith(`${key}=`)), key).toBe(!bound);
+    expect(assignments).toContain('MODEL_AUTH=other-model');
+    if (bound) expect(assignments).toContain('BOTMUX_CODEX_INSTANCE_BINDING=binding');
+    else expect(assignments).toContain('OPENAI_API_KEY=bot-key');
+  });
+  it('supplies a terminal for v3 panes without ambient TERM and preserves explicit TERM', () => {
+    const opts = optsFor('/tmp');
+    expect(strictPaneEnvArgs(opts)).toContain('TERM=xterm-256color');
+    opts.env.TERM = 'tmux-256color';
+    expect(strictPaneEnvArgs(opts)).toContain('TERM=tmux-256color');
+  });
   it('PTY child receives only approved bot runtime/auth and trusted identity', async () => {
     const { dir, script } = prepare(); let child: ReturnType<typeof spawnNodeTsScript> | undefined;
     try {
@@ -115,6 +132,8 @@ describe('strict environment real process probes', () => {
       execFileSync(realTmux!, ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', 'poison', '/bin/sleep', '60'], { env: launchEnv, stdio: 'ignore' });
       vi.stubEnv('PATH', `${binDir}:${process.env.PATH}`);
       const opts = optsFor(dir); opts.env.PATH = `${binDir}:${opts.env.PATH}`;
+      opts.env.BOTMUX_WORKFLOW = 'v3';
+      writeFileSync(script, probeSource.replace('unknownAbsent:', "terminalPresent: e.TERM === 'xterm-256color', workflowPresent: e.BOTMUX_WORKFLOW === 'v3', unknownAbsent:"));
       child = launchBackend(kind, script, dir, opts, session);
       await report(join(dir, 'report'));
       // Let tmux's delayed per-session setup finish while PATH still points
