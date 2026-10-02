@@ -7977,7 +7977,9 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
         if (!requested.ok) {
           console.error(requested.error === 'already_running'
             ? `任务 ${id} 正在运行，未重复触发`
-            : `未找到任务 ${id}`);
+            : requested.error === 'disabled'
+              ? `任务 ${id} 已暂停，请先恢复任务再运行`
+              : `未找到任务 ${id}`);
           process.exit(1);
         }
         console.log(`已标记任务 ${id} 下次 tick 立即执行（< 30s）`);

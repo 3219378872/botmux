@@ -790,12 +790,15 @@ export function requestRunNow(
   id: string,
   nextRunAt = new Date().toISOString(),
   appId?: string,
-): { ok: true } | { ok: false; error: 'not_found' | 'already_running' } {
-  return mutateTasks<{ ok: true } | { ok: false; error: 'not_found' | 'already_running' }>(working => {
+): { ok: true } | { ok: false; error: 'not_found' | 'already_running' | 'disabled' } {
+  return mutateTasks<{ ok: true } | { ok: false; error: 'not_found' | 'already_running' | 'disabled' }>(working => {
     const task = working.get(id);
     if (!task) return { result: { ok: false, error: 'not_found' } as const, changed: false };
     if (task.lastStatus === 'running') {
       return { result: { ok: false, error: 'already_running' } as const, changed: false };
+    }
+    if (task.enabled === false) {
+      return { result: { ok: false, error: 'disabled' } as const, changed: false };
     }
     task.nextRunAt = nextRunAt;
     task.manualRunRequested = true;

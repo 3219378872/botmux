@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { config } from '../src/config.js';
 import { dashboardEventBus, type DashboardEvent } from '../src/core/dashboard-events.js';
 import { createTaskWithOptionalPrecondition } from '../src/core/schedule-precondition-config.js';
-import { addTask, updateTask as editTask, runNow, setExecuteCallback, setOwnerFilter, startScheduler, stopScheduler } from '../src/core/scheduler.js';
+import { addTask, updateTask as editTask, runNow, disableTask, enableTask, setEnabled, setExecuteCallback, setOwnerFilter, startScheduler, stopScheduler } from '../src/core/scheduler.js';
 import { executeScheduledTaskWithPrecondition } from '../src/services/schedule-precondition-gate.js';
 import { readSchedulePreconditionFile } from '../src/services/schedule-precondition-file.js';
 import { resolveSchedulePrecondition } from '../src/services/schedule-precondition-store.js';
@@ -290,6 +290,47 @@ describe('calendar admission before task side effects', () => {
     expect(execute).not.toHaveBeenCalled();
     expect(Date.parse(snapshot(task.id).nextRunAt)).toBeGreaterThan(Date.now());
     expect(snapshot(task.id).lastRunAt).toBeUndefined();
+    expect(snapshot(task.id).manualRunRequested).toBeUndefined();
+  });
+  it.each(['dashboard', 'cli'])('cancels pending manual intent when paused through %s before resuming on a rest day', async entry => {
+    vi.setSystemTime(new Date('2026-09-30T04:00:00Z'));
+    const task = addTask({ name: 'pause pending manual task', schedule: '0 9 * * *', prompt: 'fixture',
+      workingDir: root, chatId: 'fixture_chat', larkAppId: APP, calendar: 'cn' });
+    const execute = vi.fn(async () => undefined);
+    setExecuteCallback(execute);
+    expect(requestRunNow(task.id)).toEqual({ ok: true });
+    if (entry === 'dashboard') expect(setEnabled(task.id, false)).toEqual({ ok: true });
+    else expect(disableTask(task.id)).toBe(true);
+    expect(snapshot(task.id).manualRunRequested).toBeUndefined();
+    vi.setSystemTime(new Date('2026-10-01T00:59:55Z'));
+    if (entry === 'dashboard') expect(setEnabled(task.id, true)).toEqual({ ok: true });
+    else expect(enableTask(task.id)).toBe(true);
+    startScheduler();
+    await advance(5_000);
+    expect(execute).not.toHaveBeenCalled();
+    expect(snapshot(task.id)).toMatchObject({ lastStatus: 'skipped', lastCalendarCheck: { reason: 'rest_date' } });
+  });
+  it('rejects durable run requests while paused without mutating the next occurrence', () => {
+    const task = create();
+    expect(disableTask(task.id)).toBe(true);
+    const paused = snapshot(task.id);
+    expect(requestRunNow(task.id)).toEqual({ ok: false, error: 'disabled' });
+    expect(snapshot(task.id)).toEqual(paused);
+  });
+  it('clears legacy pending intent even when Dashboard pause is repeated', () => {
+    const task = create();
+    updateTask(task.id, { enabled: false, disabledReason: 'manual', manualRunRequested: true });
+    expect(setEnabled(task.id, false)).toEqual({ ok: true });
+    expect(snapshot(task.id).manualRunRequested).toBeUndefined();
+  });
+  it('keeps Dashboard immediate execution available for a paused task without resuming it', async () => {
+    const task = create('absent');
+    const gate = installGate();
+    expect(setEnabled(task.id, false)).toEqual({ ok: true });
+    expect(runNow(task.id)).toEqual({ ok: true });
+    await vi.waitFor(() => expect(snapshot(task.id)).toMatchObject({ enabled: false,
+      lastStatus: 'ok', lastCalendarCheck: { reason: 'manual_bypass' } }));
+    expect(gate.model).toHaveBeenCalledTimes(1);
     expect(snapshot(task.id).manualRunRequested).toBeUndefined();
   });
   it('rejects once binding on create/update while preserving legacy once', () => {

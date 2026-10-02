@@ -221,6 +221,7 @@ describe('work calendar CLI configuration and persisted manual intent', () => {
     const calendars = await f.run(['calendars']);
     expect(calendars.code, calendars.output).toBe(0);
     expect(calendars.output).toContain('"name":"demo"');
+    expect((await f.run(['resume', f.task.id])).code).toBe(0);
     const requested = await f.run(['run', f.task.id]);
     expect(requested.code, requested.output).toBe(0);
     expect(f.read()[f.task.id].manualRunRequested).toBe(true);
@@ -234,5 +235,15 @@ describe('work calendar CLI configuration and persisted manual intent', () => {
     const added = await f.run(['add', '0 9 * * *', 'fixture prompt', '--id', 'aabbcc01', '--calendar', 'demo', '--calendar-day-type', 'restday', '--chat-id', 'fixture_chat', '--new-topic', '--workdir', f.root]);
     expect(added.code, added.output).toBe(0);
     expect(f.read().aabbcc01).toMatchObject({ calendar: 'demo', calendarDayType: 'restday', prompt: 'fixture prompt', executionPosition: 'new-topic', larkAppId: app });
+  });
+  it('refuses run on a paused task and tells the user to resume first', async () => {
+    const f = fixture();
+    expect((await f.run(['pause', f.task.id])).code).toBe(0);
+    const paused = f.read()[f.task.id];
+    const result = await f.run(['run', f.task.id]);
+    expect(result.code).not.toBe(0);
+    expect(result.output).toContain('已暂停');
+    expect(result.output).toContain('先恢复');
+    expect(f.read()[f.task.id]).toEqual(paused);
   });
 });
