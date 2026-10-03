@@ -27,7 +27,7 @@
  *   botmux whiteboard status|enable|disable|current|list|read|update|write — local project whiteboard
  */
 import { authorizeOwnerlessScheduleCreator, requireScheduleCreatorUnionId } from './core/schedule-creator-authorization.js';
-import { readSchedulePromptUpdate, SCHEDULE_UPDATE_USAGE } from './cli/schedule-update.js';
+import { readScheduleUpdate, SCHEDULE_UPDATE_USAGE } from './cli/schedule-update.js';
 import { execSync, execFileSync, spawnSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, copyFileSync, createReadStream, readFileSync, writeFileSync, renameSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, statSync, unlinkSync, rmSync, realpathSync, chmodSync } from 'node:fs';
 import { underReadIsolation, sendCredFilePath } from './adapters/cli/read-isolation.js';
@@ -6853,6 +6853,8 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
 定时任务（可在 CLI 会话内自动推断 chat）:
   schedule list                        列出所有任务
   schedule add <schedule> <prompt>     添加任务（ex: "30m" / "every 2h" / "每日9:00" / "0 9 * * *"）
+       --calendar <name>               绑定内置或自定义工作日历；手动执行绕过
+       --calendar-day-type <type>      workday 仅工作日（默认）；restday 仅休息日
        --model <id>                    本任务用指定模型跑（如 gpt-5.6-sol），不改 bot 配置
        --reasoning-effort <level>      low|medium|high|xhigh|max|ultra（模型支持才生效）
                                        两者都只在本任务新建会话那次执行生效；配 --new-topic 则每次生效
@@ -7635,6 +7637,29 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
     if (first) scheduleStore.setScheduleScope(first);
   }
 
+  if (sub === 'calendars') {
+    const { BUILTIN_WORK_CALENDARS, readWorkCalendarDefinitions, parseWorkCalendar } = await import('./services/work-calendar.js');
+    const appId = scheduleStore.getScheduleScope();
+    if (!appId) throw new Error('calendar_scope_missing');
+    for (const [name, { calendar, ...metadata }] of Object.entries(BUILTIN_WORK_CALENDARS)) {
+      console.log(JSON.stringify({ name, kind: 'builtin', ...metadata, ...parseWorkCalendar(calendar) }));
+    }
+    let definitions: Record<string, unknown>;
+    try { definitions = readWorkCalendarDefinitions(appId); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    for (const [name, value] of Object.entries(definitions)) {
+      if (Object.hasOwn(BUILTIN_WORK_CALENDARS, name)) {
+        console.log(JSON.stringify({ name, kind: 'local', error: 'reserved_builtin_calendar' }));
+        continue;
+      }
+      try { console.log(JSON.stringify({ name, ...parseWorkCalendar(value) })); }
+      catch { console.log(JSON.stringify({ name, error: 'calendar_invalid' })); }
+    }
+    return;
+  }
   if (!sub || sub === 'list' || sub === 'ls') {
     const tasks = cliScopeAppId
       ? scheduleStore.listTasks()
@@ -7657,6 +7682,10 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
       console.log(`${status} [${t.id}] ${display} | ${t.name}${t.silent ? ' 🔇静默' : ''}${t.followActive ? ' ↷跟随活跃话题' : ''}`);
       console.log(`   prompt: ${prompt.length > 60 ? prompt.slice(0, 60) + '…' : prompt}`);
       console.log(`   chat: ${chatId.slice(0, 12)}…   thread: ${rootId.slice(0, 16)}…`);
+      if (t.calendar !== undefined) {
+        const { previewTaskCalendar } = await import('./services/work-calendar.js');
+        console.log(`   calendar: ${t.calendar} ${JSON.stringify(previewTaskCalendar(t, t.larkAppId ?? scheduleStore.getScheduleScope() ?? undefined))}`);
+      }
       console.log(`   next: ${next}   last: ${last}${t.lastStatus === 'error' ? ' ❌' : ''}`);
       console.log('');
     }
@@ -7724,6 +7753,12 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
     // on bot config this process may not be able to read (a sandboxed session
     // has no bots.json). Fire time resolves it against the live bot and degrades
     // with a warning rather than skipping the run.
+    const calendar = argValue(rest, '--calendar');
+    if (rest.includes('--calendar') && !calendar) throw new Error('--calendar requires a name');
+    const calendarDayType = argValue(rest, '--calendar-day-type');
+    if (rest.includes('--calendar-day-type') && !calendarDayType) throw new Error('--calendar-day-type requires workday or restday');
+    const { normalizeCalendarDayType } = await import('./services/work-calendar.js');
+    const normalizedDayType = normalizeCalendarDayType(calendarDayType);
     const model = argValue(rest, '--model')?.trim();
     if (rest.includes('--model') && !model) {
       console.error('--model 需要一个模型 id，例如 --model gpt-5.6-sol。');
@@ -7825,6 +7860,8 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
         deliver,
         silent,
         followActive: wantsFollowActive ? true : undefined,
+        calendar,
+        calendarDayType: normalizedDayType,
         model,
         reasoningEffort,
       });
@@ -7841,6 +7878,7 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
     const next = task.nextRunAt ? new Date(task.nextRunAt).toLocaleString('zh-CN', { timeZone: scheduleTimeZone() }) : '—';
     console.log(`✅ 已创建定时任务 [${task.id}] ${task.name}`);
     console.log(`   规则: ${parsed.display}`);
+    if (calendar) console.log(`   自定义工作日历: ${calendar}（${normalizedDayType === 'restday' ? '仅休息日' : '仅工作日'}，手动执行绕过）`);
     console.log(`   下次执行: ${next}`);
     console.log(`   工作目录: ${workingDir}`);
     console.log(`   执行位置: ${executionPosition === 'new-topic' ? '每次新话题' : executionPosition === 'top-level' ? '群消息顶层' : '话题下'}`);
@@ -7879,7 +7917,7 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
 
   switch (sub) {
     case 'update': {
-      const prompt = readSchedulePromptUpdate(rest);
+      const updates = readScheduleUpdate(rest);
       const authenticatedCur = await detectAuthenticatedCurrentSession();
       if (!scheduleStore.getTask(id) && !retargetIfElsewhere()) {
         throw new Error(`未找到任务 ${id}`);
@@ -7899,9 +7937,9 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
       if (bound?.preconditionRef) {
         throw new Error(`任务 ${id} 绑定了守护前置条件（precondition），CLI 更新会破坏其安全绑定导致任务停止执行；请在 Dashboard 的定时任务页修改提示词。`);
       }
-      const result = scheduler.updateTask(id, { prompt });
+      const result = scheduler.updateTask(id, updates);
       if (!result.ok) throw new Error(`无法更新任务 ${id}: ${result.error}`);
-      console.log(`✅ 已更新任务 ${id} 的 prompt；后续执行生效，未触发补跑。`);
+      console.log(`✅ 已更新任务 ${id} 的配置；后续执行生效，未触发补跑。`);
       break;
     }
     case 'remove':
@@ -7941,7 +7979,9 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
         if (!requested.ok) {
           console.error(requested.error === 'already_running'
             ? `任务 ${id} 正在运行，未重复触发`
-            : `未找到任务 ${id}`);
+            : requested.error === 'disabled'
+              ? `任务 ${id} 已暂停，请先恢复任务再运行`
+              : `未找到任务 ${id}`);
           process.exit(1);
         }
         console.log(`已标记任务 ${id} 下次 tick 立即执行（< 30s）`);
