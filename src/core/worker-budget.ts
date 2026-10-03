@@ -3,7 +3,6 @@ import { totalmem } from 'node:os';
 import { posix } from 'node:path';
 import type { WorkerConfig } from '../global-config.js';
 
-export const DEFAULT_MIN_AVAILABLE_MEMORY_BYTES = 4 * 1024 ** 3;
 export const DEFAULT_MIN_AVAILABLE_MEMORY_FRACTION = 0.25;
 /** Upper bound for the fraction-derived default reserve. The reserve only has
  *  to cover spawning ONE worker — production measurement of ~200 live CLI
@@ -17,7 +16,7 @@ export const DEFAULT_MIN_AVAILABLE_MEMORY_FRACTION = 0.25;
  *  that floor exceeded the whole RAM, MemAvailable could never reach it, and
  *  every worker fork was rejected. The live PSI gate (maxMemoryFullAvg10)
  *  remains the signal for genuine host-wide contention. */
-export const DEFAULT_MIN_AVAILABLE_MEMORY_CAP_BYTES = DEFAULT_MIN_AVAILABLE_MEMORY_BYTES;
+export const DEFAULT_MIN_AVAILABLE_MEMORY_CAP_BYTES = 4 * 1024 ** 3;
 export const DEFAULT_MAX_MEMORY_FULL_AVG10 = 20;
 /**
  * Edge-of-rejection band for worker admission: when available memory is below
