@@ -191,6 +191,8 @@ export type BotDefaultsRow = {
   canTalkDaemonCommands?: string;
   launchShell?: string;
   env?: string;
+  envKeys?: string[];
+  envPolicy?: { mode: 'inherit' | 'strict'; inherit?: string[] };
   riff?: Record<string, unknown> | null;
   /** 被动入群时自动把 owner 拉进群。缺省 ON —— 只有显式 false 表示关闭。 */
   autoInviteOwnerOnGroupAdd?: boolean;

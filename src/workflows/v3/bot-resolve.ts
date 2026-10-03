@@ -11,6 +11,7 @@
  * file is edited.)
  */
 
+import { normalizeEnvPolicy } from '../../core/env-policy.js';
 import { effectiveDefaultWorkingDir, type BotConfig } from '../../bot-registry.js';
 import { newSessionCodexInstanceState, type SessionCliInstanceBindingV1 } from '../../services/codex-instance-pool.js';
 import { isGoalNode, isLoopNode, type V3Dag } from './dag.js';
@@ -73,6 +74,7 @@ export function botToSnapshot(bot: BotConfig, workingDirOverride?: string): BotS
   return {
     ...(instance.cliInstanceBinding ? { cliInstanceBinding: instance.cliInstanceBinding, cliRuntime: instance.cliRuntime } : {}),
     larkAppId: bot.larkAppId,
+    ...(bot.envPolicy ? { envPolicy: normalizeEnvPolicy(bot.envPolicy) } : {}),
     cliId: bot.cliId,
     ...((instance.cliPathOverride ?? bot.cliPathOverride) ? { cliPathOverride: instance.cliPathOverride ?? bot.cliPathOverride } : {}),
     ...(bot.model ? { model: bot.model } : {}),
@@ -149,6 +151,7 @@ export function parseFrozenBotSnapshots(raw: unknown, dag?: V3Dag): Map<string, 
     'cliId',
     'cliPathOverride',
     'model',
+    'envPolicy',
     'sandbox',
     'sandboxPaths',
     'sandboxHidePaths',
@@ -162,6 +165,7 @@ export function parseFrozenBotSnapshots(raw: unknown, dag?: V3Dag): Map<string, 
       throw new Error(`bots.snapshot.json[${JSON.stringify(key)}] must be an object`);
     }
     const obj = value as Record<string, unknown>;
+    if (obj.envPolicy !== undefined) normalizeEnvPolicy(obj.envPolicy);
     const extra = Object.keys(obj).filter((field) => !allowed.has(field));
     if (extra.length > 0) {
       throw new Error(`bots.snapshot.json[${JSON.stringify(key)}] has unsupported key(s): ${extra.join(', ')}`);
@@ -225,6 +229,7 @@ export function parseFrozenBotSnapshots(raw: unknown, dag?: V3Dag): Map<string, 
       ...(obj.cliInstanceBinding ? { cliInstanceBinding: obj.cliInstanceBinding as SessionCliInstanceBindingV1,
         cliRuntime: obj.cliRuntime as BotSnapshot['cliRuntime'] } : {}),
       larkAppId: obj.larkAppId,
+      ...(obj.envPolicy ? { envPolicy: normalizeEnvPolicy(obj.envPolicy) } : {}),
       cliId: obj.cliId as BotSnapshot['cliId'],
       ...(obj.cliPathOverride !== undefined ? { cliPathOverride: obj.cliPathOverride as string } : {}),
       ...(obj.model !== undefined ? { model: obj.model as string } : {}),

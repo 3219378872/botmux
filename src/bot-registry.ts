@@ -36,6 +36,7 @@ import type { BotSkillPolicy, SkillSelector } from './core/skills/types.js';
 import { normalizeStartupCommandList } from './core/startup-commands.js';
 import { DAEMON_COMMANDS } from './core/passthrough-commands.js';
 import { sanitizePerBotEnv } from './core/per-bot-env.js';
+import { normalizeEnvPolicy, type EnvPolicy } from './core/env-policy.js';
 import { normalizeCredentialsSourceDir } from './services/cli-credential-source.js';
 import { resolveBotmuxConfigDir, resolveBotsConfigFile, type BotsConfigProvenance } from './core/config-dir.js';
 import { normalizeSubstituteMode } from './services/substitute-mode-normalize.js';
@@ -1992,6 +1993,8 @@ export interface BotConfig {
    * the shared tmux/zellij server env. Missing/empty → undefined.
    */
   env?: Record<string, string>;
+  /** Explicit process inheritance policy; missing retains historical behavior. */
+  envPolicy?: EnvPolicy;
   /**
    * Optional per-bot priority skill policy. Missing means botmux does not alter
    * the underlying CLI's native skill discovery or spawn arguments.
@@ -3688,6 +3691,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
 
     // env：per-bot 环境变量（如代理 / 第三方服务商端点 ANTHROPIC_BASE_URL+AUTH_TOKEN）。
     // sanitizePerBotEnv 过滤非法/保留键、字符串化基本类型；空 → undefined（保持 bots.json 干净）。
+    const envPolicy = normalizeEnvPolicy(entry.envPolicy);
     const sanitizedEnv = sanitizePerBotEnv(entry.env);
     const env = Object.keys(sanitizedEnv).length > 0 ? sanitizedEnv : undefined;
 
@@ -3949,6 +3953,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       tuiSlashAllow,
       startupCommands,
       env,
+      envPolicy,
       skills,
       plugins,
       lang: isLocale(entry.lang) ? entry.lang : undefined,

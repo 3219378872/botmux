@@ -6764,6 +6764,8 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   logs        查看/跟随 daemon 日志（--lines N, --bot <0-based-index|name|appId>, --no-follow 只打印不跟随）
   model-proxy serve --config <path>
               启动有鉴权的本机模型协议入口（Chat Completions 子集）
+  env-policy get|set <JSON>|unset [--bot <name|appId>]
+              查看或配置本 bot 的进程环境继承（仅显示模式/变量名）
   status      查看 daemon 状态
   upgrade     升级到最新版本（别名：update）
               支持可选 target：canary / beta / rc 等频道，或具体版本号（默认 latest）
@@ -16897,6 +16899,11 @@ switch (command) {
     if (sub === 'enable' || sub === 'install') enableAutostart(opts);
     else if (sub === 'disable' || sub === 'uninstall') disableAutostart(opts);
     else autostartStatus(opts);
+    break;
+  }
+  case 'env-policy': {
+    try { const { cmdEnvPolicy } = await import('./cli/env-policy.js'); await cmdEnvPolicy(process.argv.slice(3)); }
+    catch (error) { console.error(error instanceof Error ? error.message : 'Environment policy update failed'); process.exitCode = 1; }
     break;
   }
   case 'worker-budget': {

@@ -6217,13 +6217,12 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
       canTalkDaemonCommands = cfg.canTalkDaemonCommands.join(' ');
     }
   } catch { /* none */ }
-  // Per-bot env → pretty JSON for the dashboard textarea. The dashboard is
-  // owner-authenticated, so showing the real values here is acceptable (same
-  // as editing bots.json directly); the chat-facing /config get masks them.
-  let env = '';
+  // Values are write-only in Dashboard; expose names for policy diagnosis.
+  const env = '';
+  let envKeys: string[] = [];
   try {
     const e = getBot(cachedLarkAppId).config.env;
-    if (e && typeof e === 'object' && Object.keys(e).length) env = JSON.stringify(e, null, 2);
+    if (e && typeof e === 'object') envKeys = Object.keys(e).sort();
   } catch { /* none */ }
   // defaultWorkingDir — the "仅默认目录" mode source. Mutually exclusive with
   // defaultOncall in the dashboard 3-way selector; the frontend derives the
@@ -6281,6 +6280,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     scratchDenyPaths: (() => { try { return getBot(cachedLarkAppId).config.scratchDenyPaths ?? null; } catch { return null; } })(),
     scratchSupported: process.platform === 'linux' || process.platform === 'darwin',
     codexAuthSync,
+    envPolicy: (() => { try { return getBot(cachedLarkAppId).config.envPolicy ?? { mode: 'inherit' }; } catch { return { mode: 'inherit' }; } })(),
     sandboxPaths: sandboxStore.getBotSandboxPaths(cachedLarkAppId) ?? null,
     readIsolation: sandboxStore.getBotReadIsolation(cachedLarkAppId),
     // Full enforceability (adapter support + no wrapperCli + macOS) — the UI
@@ -6356,6 +6356,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     canTalkDaemonCommands,
     launchShell: getBot(cachedLarkAppId).config.launchShell ?? '',
     env,
+    envKeys,
     riff: redactRiffForClient(getBot(cachedLarkAppId).config.riff),
     summaryRange: summaryRangeFromBotConfig(getBot(cachedLarkAppId).config),
     skills: getBot(cachedLarkAppId).config.skills ?? null,
@@ -7794,10 +7795,23 @@ ipcRoute('PUT', '/api/bot-env', async (req, res) => {
   }
   const r = await applyConfigField(cachedLarkAppId, spec, value);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, env: value ? JSON.stringify(value, null, 2) : '' });
+  jsonRes(res, 200, { ok: true, env: '', envKeys: value ? Object.keys(value).sort() : [] });
 });
 
 // Codex credential policy: shared global login or an independent per-bot CODEX_HOME.
+ipcRoute('PUT', '/api/bot-env-policy', async (req, res) => {
+  if (!cachedLarkAppId) { jsonRes(res, 503, { error: 'larkAppId_not_set' }); return; }
+  let body: { envPolicy?: unknown };
+  try { body = await readJsonBody<{ envPolicy?: unknown }>(req); }
+  catch { jsonRes(res, 400, { error: 'invalid JSON' }); return; }
+  const spec = findConfigField('envPolicy')!;
+  const c = body.envPolicy === null ? { ok: true as const, value: null } : coerceConfigValue(spec, JSON.stringify(body.envPolicy));
+  if (!c.ok) { jsonRes(res, 400, { error: 'invalid environment policy' }); return; }
+  const r = await applyConfigField(cachedLarkAppId, spec, c.value);
+  if (!r.ok) { jsonRes(res, 400, { error: r.reason }); return; }
+  jsonRes(res, 200, { ok: true, envPolicy: c.value });
+});
+
 ipcRoute('PUT', '/api/bot-codex-auth-sync', async (req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
   let body: { codexAuthSync?: unknown };
