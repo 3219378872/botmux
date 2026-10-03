@@ -1027,7 +1027,10 @@ const botOnboarding = new BotOnboardingManager({
 // 飞书 Web 登录态刷新（机器人改名缺登录态时的 dashboard 扫码入口）。机器级单例，
 // 写 ~/.botmux/feishu-session.json，与 setup / onboarding 复用同一份登录态。
 const feishuLogin = new FeishuLoginManager();
-const subs = new Map<string, () => void>();
+/** Live event subscription per bot, with the IPC port it is bound to: a daemon
+ *  that restarts on another port keeps the same app id, so the port is what
+ *  tells a still-valid subscription from one dialling a dead endpoint. */
+const subs = new Map<string, { off: () => void; ipcPort: number }>();
 const attaching = new Set<string>();   // dedup concurrent attaches per appId
 
 interface ResolvedDashboardSettings {
@@ -2038,9 +2041,9 @@ async function attachDaemon(d: import('./dashboard/registry.js').DaemonInfo): Pr
     // 2. Open SSE subscription if not already (idempotent). The barrier
     //    below runs inside subscribeDaemon, after the stream is established.
     if (!subs.has(d.larkAppId)) {
-      subs.set(
-        d.larkAppId,
-        subscribeDaemon(d, aggregator, e =>
+      subs.set(d.larkAppId, {
+        ipcPort: d.ipcPort,
+        off: subscribeDaemon(d, aggregator, e =>
           logger.warn(`[aggregator] ${d.larkAppId}: ${e.message}`),
           (_url, init) => fetchDaemonIpc(d.ipcPort, '/api/events', init),
           // Snapshot barrier: install an authoritative snapshot before any
@@ -2052,7 +2055,7 @@ async function attachDaemon(d: import('./dashboard/registry.js').DaemonInfo): Pr
           // snapshot is discarded instead of clobbering the new generation.
           signal => reconcileDaemon(d, signal),
         ),
-      );
+      });
     }
   } finally {
     attaching.delete(d.larkAppId);
@@ -2082,6 +2085,14 @@ function syncSubscriptions(): void {
   // because the registry callback is sync and the attach is per-daemon
   // independent.
   for (const d of daemons) {
+    // A daemon that came back on another IPC port (its descriptor rewritten in
+    // place, never removed) is not "already attached": the old subscription
+    // and its snapshot closure would keep dialling the dead port forever.
+    const sub = subs.get(d.larkAppId);
+    if (sub && sub.ipcPort !== d.ipcPort) {
+      sub.off();
+      subs.delete(d.larkAppId);
+    }
     if (!subs.has(d.larkAppId)) {
       void attachDaemon(d);
     }
@@ -2099,8 +2110,8 @@ function syncSubscriptions(): void {
   // Close subscriptions for daemons that went offline. Cache entries are
   // intentionally retained — the user may still want to see the last-known
   // state of those sessions/schedules in the dashboard.
-  for (const [id, off] of subs) {
-    if (!online.has(id)) { off(); subs.delete(id); }
+  for (const [id, sub] of subs) {
+    if (!online.has(id)) { sub.off(); subs.delete(id); }
   }
 }
 
@@ -8707,7 +8718,7 @@ async function maybeAnnounceHallPresence(): Promise<void> {
 function shutdown(): void {
   codexNotifierAbort.abort();
   stopAutoCleanup();
-  for (const off of subs.values()) off();
+  for (const sub of subs.values()) sub.off();
   subs.clear();
   registry.stop();
   resourceMonitor.stop();
