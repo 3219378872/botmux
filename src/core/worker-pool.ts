@@ -1,4 +1,6 @@
 import { handoffCardClosed, handoffCardBlocksStreaming, applyHandoffCardEvent, type HandoffCardEvent } from './handoff-card-lifecycle.js';
+import { assertSendTopicsAvailable, createTopicMessageLookupCache, TopicSendError, type TopicMessageLookup } from '../cli/topic-send-guard.js';
+import { getMessageDetail as getTopicMessageDetail } from '../im/lark/client.js';
 import { commitTriggerStreamingCard, discardTriggerStreamingCard, hasPendingTriggerStreamingCard } from './trigger-streaming-card.js';
 import { sessionPromptInjection } from './prompt-injection.js';
 import { sandboxBoolValue, normalizeSandboxMode, normalizeScratchStorage } from '../adapters/cli/sandbox-mode.js';
@@ -39,7 +41,7 @@ import { persistStreamCardState, rememberLastCliInput } from './session-manager.
 import { spawnWorker, isStandaloneBinary, WORKER_ENTRY_SUBCOMMAND } from './self-spawn.js';
 import { resolveSessionLaunchModel, resolveSessionGroupSettings } from './session-model.js';
 import { effectiveReplyDelivery } from './reply-delivery.js';
-import { fallbackTurnId, frozenReplyContextForTurn, isSubstituteTurn, pickTurnReplyTarget, reconcileCronTaskReplyAnchors, rehomeReplyTargetState, replyTargetKey } from './reply-target.js';
+import { fallbackTurnId, frozenReplyContextForTurn, isSubstituteTurn, pickTurnReplyTarget, reconcileCronTaskReplyAnchors, rehomeReplyTargetState, replyTargetKey, resolveSessionReplyTarget } from './reply-target.js';
 import { updateMessage, deleteMessage, pinMessage, unpinMessage, listChatPins, sendEphemeralCard, sendUserMessage, addReaction, removeReaction, getMessageChatId, resolveCurrentChatBotOpenIdsByLarkAppIds, MessageWithdrawnError, MessageUpdateExpiredError, type LarkPinRecord } from '../im/lark/client.js';
 import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTuiPromptCard, buildTuiPromptResolvedCard, buildTuiPromptFailedCard, buildRelayedFrozenCard, buildTurnFailedCard, getCliDisplayName, type IdleCardLabel } from '../im/lark/card-builder.js';
 import { buildClosedSessionCard } from './closed-session-card.js';
@@ -787,6 +789,8 @@ function syncWorkerDisplayMode(ds: DaemonSession): void {
 // ─── Callbacks set by daemon at startup ─────────────────────────────────────
 
 export interface WorkerSessionReplyOptions {
+  /** Per-delivery lookup cache, shared only across this send pipeline. */
+  topicMessageLookup?: TopicMessageLookup;
   uuid?: string;
   quoteMessageId?: string;
   beforeQuoteFallback?: () => void | Promise<void>;
@@ -16918,6 +16922,7 @@ function deliverFinalOutput(
   }
   const cb = requireCallbacks();
   const effectiveCliId = ds.session.cliId ?? getBot(ds.larkAppId).config.cliId;
+  let topicMessageLookup: TopicMessageLookup | undefined;
   const scopedReply = (
     content: string,
     msgType?: string,
@@ -16929,7 +16934,7 @@ function deliverFinalOutput(
     msgType,
     ds.larkAppId,
     fallbackTurnId(ds, turnId),
-    { ...opts, sourceSessionId: ds.session.sessionId },
+    { ...opts, sourceSessionId: ds.session.sessionId, ...(topicMessageLookup ? { topicMessageLookup } : {}) },
   );
   setTimeout(async () => {
     if (!isStillOwned()) {
@@ -17344,6 +17349,14 @@ function deliverFinalOutput(
               : {}),
           }
         : codexAppSettlementReply ?? { uuid: bridgeFinalOutputUuid(ds, msg) };
+      if (!managedReceiver && getBot(ds.larkAppId).config.topicUnavailablePolicy === 'stop') {
+        topicMessageLookup = createTopicMessageLookupCache(getTopicMessageDetail).lookup;
+        const topicTarget = frozenReplyTarget ?? resolveSessionReplyTarget(ds, fallbackTurnId(ds, msg.replyTurnId ?? msg.turnId));
+        await assertSendTopicsAvailable(ds.larkAppId,
+          [topicTarget.mode === 'thread' || topicTarget.mode === 'quote' ? topicTarget.rootMessageId : undefined],
+          topicMessageLookup, 'stop');
+        if (!isStillOwned()) { onComplete?.(false); return; }
+      }
       if (!managedReceiver && (!msg.kind || msg.kind === 'bridge') && replyCardModeFor(ds, msg.turnId) !== 'legacy') {
         await flushTurnReplyTools(ds, msg.turnId, msg.dispatchAttempt).catch(error => {
           logger.warn(`[${t}] reply-card final tool flush: ${error.message}`);
@@ -17421,6 +17434,21 @@ function deliverFinalOutput(
         // session and consume only this turn's automatic delivery retry.
         ds.lastBridgeEmittedUuid = finalOutputDedupeKey(ds, msg);
         onComplete?.(true);
+        return;
+      }
+      if (err instanceof TopicSendError && err.code === 'TOPIC_SEND_BLOCKED') {
+        // The original topic cannot receive a notice. Surface the failure on the
+        // existing Dashboard attention channel without changing the send route.
+        ds.agentAttention = { kind: 'blocked', reason: err.message, at: Date.now() };
+        // Push the needs-you row immediately; the owner-reminder sweep would
+        // surface it eventually, but the Dashboard must not wait for the next
+        // row refresh to light up.
+        publishAttentionPatch(ds);
+        emitSessionLifecycleHook(ds, 'session.requires_attention', {
+          reason: 'topic_send_blocked', message: err.message, turnId: msg.turnId,
+        });
+        logger.warn(`[${t}] Final output stopped: ${err.message}`);
+        onComplete?.(false);
         return;
       }
       if (err instanceof MessageWithdrawnError) {
