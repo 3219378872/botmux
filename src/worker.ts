@@ -142,6 +142,10 @@ import {
   selectRestorableBridgeTurns,
   writeBridgeTurnJournal,
 } from './services/bridge-turn-journal.js';
+import {
+  readScheduledTaskAnchors,
+  upsertScheduledTaskAnchor,
+} from './services/bridge-scheduled-anchors.js';
 import { defaultGatewayEntry, ensureGatewayEntry } from './core/plugins/mcp/gateway-installer.js';
 import {
   sessionMcpGatewayPathRegex,
@@ -4792,7 +4796,13 @@ let bridgeStalePidStateSessionId: string | undefined;
 const bridgeSecondaryPaths = new Map<string, number>(); // path → offset
 let bridgeOffset = 0;
 let bridgePendingTail = '';
-const bridgeQueue = new BridgeTurnQueue(notifyTerminalTurnStarted);
+const bridgeQueue = new BridgeTurnQueue(
+  notifyTerminalTurnStarted,
+  (taskId, anchor) => {
+    persistScheduledTaskAnchor(taskId, anchor);
+    syncCronTaskAnchorsToDaemon();
+  },
+);
 /** Counts background Agent/Task dispatches whose completion notification has
  *  not yet arrived. Consulted at the PTY idle edge (markPromptReady): a main
  *  turn that only went quiet because it is awaiting a background sub-agent must
@@ -5181,6 +5191,56 @@ function bridgeTurnJournalFilePath(): string | undefined {
   return join(process.env.SESSION_DATA_DIR, 'turn-marks', `${sessionId}.json`);
 }
 
+/** Per-session durable file of built-in CronCreate task → topic anchors.
+ *  Sibling of the pending-turn journal; lets a re-attached worker keep
+ *  routing scheduled reports to the topic each task was created in. */
+function scheduledTaskAnchorsFilePath(): string | undefined {
+  if (!process.env.SESSION_DATA_DIR || !sessionId) return undefined;
+  return join(process.env.SESSION_DATA_DIR, 'turn-marks', `${sessionId}.cron-anchors.json`);
+}
+
+function persistScheduledTaskAnchor(taskId: string, anchor: string | undefined): void {
+  const path = scheduledTaskAnchorsFilePath();
+  if (!path) return;
+  try {
+    upsertScheduledTaskAnchor(path, taskId, anchor);
+  } catch (err: any) {
+    log(`Scheduled task anchor persist failed (${err.message}) for task ${taskId.substring(0, 8)}`);
+  }
+}
+
+/** Push the worker's full task→turnId anchor snapshot to the daemon, which
+ *  mirrors it onto the session and pins the referenced replyTargets records
+ *  against its 32-entry eviction. Full snapshot (not deltas) keeps the two
+ *  sides self-healing after either side restarts. Best-effort: a missed sync
+ *  only loses the eviction exemption; the worker file stays authoritative. */
+function syncCronTaskAnchorsToDaemon(): void {
+  try {
+    send({ type: 'cron_task_anchors_sync', anchors: bridgeQueue.scheduledTaskAnchorsSnapshot() });
+  } catch (err: any) {
+    log(`Cron task anchor sync failed (${err.message})`);
+  }
+}
+
+/** One-shot: seed the queue's task→anchor map from disk before any live
+ *  transcript events are ingested, so a worker re-attaching to a long-lived
+ *  Claude process keeps the create-time topic for every surviving cron task. */
+let scheduledAnchorsRestored = false;
+function restoreScheduledTaskAnchorsOnce(): void {
+  if (scheduledAnchorsRestored) return;
+  scheduledAnchorsRestored = true;
+  const path = scheduledTaskAnchorsFilePath();
+  if (!path) return;
+  const restored = readScheduledTaskAnchors(path);
+  if (restored.size > 0) {
+    bridgeQueue.restoreScheduledTaskAnchors(restored);
+    log(`Bridge restored ${restored.size} scheduled task anchor(s) from disk`);
+  }
+  // Re-assert the pins on the daemon even when the file is empty: a fresh
+  // worker's empty authoritative snapshot must not leave stale pins behind.
+  syncCronTaskAnchorsToDaemon();
+}
+
 function journalBridgeTurnMark(entry: {
   turnId: string;
   dispatchAttempt?: number;
@@ -5482,6 +5542,10 @@ function bridgeAbsorbBaseline(): void {
   // resume-fallback notice can distinguish real context loss from a
   // first-turn launch that died before the CLI ever wrote its session file.
   cliTranscriptEverExisted = true;
+  // Restore CronCreate task→topic anchors before ANY transcript ingest on
+  // every attach path (journal-restore below, normal baseline, /adopt), so a
+  // re-attached worker keeps routing surviving scheduled jobs correctly.
+  restoreScheduledTaskAnchorsOnce();
   if (!lastInitConfig?.adoptMode) {
     // Restart recovery: if the previous generation left pending Lark turns in
     // the durable journal (worker/daemon died mid-turn), re-mark them and
@@ -6605,7 +6669,17 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
   // a send credit into turn N's window via shouldSuppressBridgeEmit.
   const markers = adoptMode ? [] : readSendMarkers();
   const remainingPending = bridgeQueue.peek();
-  const nextPendingMarkTimeMs = remainingPending.length > 0 ? remainingPending[0].markTimeMs : undefined;
+  // Only a STARTED pending turn can bound the last ready turn's send window.
+  // An unstarted mark's user event hasn't landed, so it has produced no sends
+  // to leak backwards — and under type-ahead its markTimeMs is the early
+  // flush-time mark, often EARLIER than a ready turn that was inserted ahead
+  // of it (a built-in scheduled fire or a local turn). Using it then inverts
+  // the window [ready.markTimeMs, earlier) and excludes every real marker,
+  // letting an explicit final `botmux send` escape suppression → duplicate.
+  // Mirrors the codex bridge's identical guard below.
+  const nextPendingMarkTimeMs = remainingPending.length > 0 && remainingPending[0].started
+    ? remainingPending[0].markTimeMs
+    : undefined;
   const cache = new Map<string, ReturnType<typeof drainTranscript>>();
   // Turns suppressed as GENUINE SILENCE — see emitReadyCodexTurns for the full
   // rationale. Tracked by object identity across this function's two loops so
@@ -6618,9 +6692,16 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     // provider error through transcript fallback (regardless of send markers).
     if (turn.terminalOutcome && turn.terminalOutcome.status !== 'completed') continue;
     const nextBoundaryMs = (i + 1 < ready.length ? ready[i + 1].markTimeMs : nextPendingMarkTimeMs);
-    if (turn.isLocal && !zeroPromptTerminalSync() && shouldSuppressBridgeEmit({ markTimeMs: turn.markTimeMs, isLocal: turn.isLocal }, nextBoundaryMs, markers, adoptMode, replyDeliveryMode())) {
-      const reason = turn.isLocal ? 'local-typed' : 'model called botmux send within window';
-      log(`Bridge fallback suppressed for turn ${turn.turnId.substring(0, 8)} (${reason})`);
+    // Built-in scheduled turns MUST NOT run this pre-text gate: without
+    // finalText the gate treats "any in-window marker" as already-delivered
+    // (empty final is covered by a single progress send), so a turn that sent
+    // a short progress note and then produced its real long final gets
+    // suppressed here before the text is even read — the materially-longer
+    // check at the gate below can never run. Scheduled turns are always
+    // evaluated AFTER the transcript text is available, where NOTHING_TO_SEND
+    // and send-marker dedup (incl. the length comparison) have the final.
+    if (!turn.isScheduled && turn.isLocal && !zeroPromptTerminalSync() && shouldSuppressBridgeEmit({ markTimeMs: turn.markTimeMs, isLocal: turn.isLocal, isScheduled: turn.isScheduled }, nextBoundaryMs, markers, adoptMode, replyDeliveryMode())) {
+      log(`Bridge fallback suppressed for turn ${turn.turnId.substring(0, 8)} (local-typed)`);
       continue;
     }
 
@@ -6643,7 +6724,7 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     if (assistantText.length === 0) continue;
     const lastUuid = turn.assistantUuids[turn.assistantUuids.length - 1];
 
-    const gateInput = { markTimeMs: turn.markTimeMs, isLocal: turn.isLocal, finalText: assistantText,
+    const gateInput = { markTimeMs: turn.markTimeMs, isLocal: turn.isLocal, isScheduled: turn.isScheduled, finalText: assistantText,
       forwardLocalFinal: zeroPromptTerminalSync() };
     notifyExplicitRepliesObserved(
       turn.turnId,
@@ -6659,7 +6740,7 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
       // turn here already means completed. The claude family's limits arrive via
       // maybeEmitStructuredRateLimit → noteStructuredLimit, which revokes this.
       usageLimitTracker.noteTurnCompleted('answered');
-      const reason = turn.isLocal ? 'local-typed' : 'model called botmux send within window';
+      const reason = turn.isScheduled ? 'scheduled turn already sent / silent' : 'local-typed';
       log(`Bridge fallback suppressed for turn ${turn.turnId.substring(0, 8)} (${reason})`);
       // Positive silence evidence for the terminal — only a bare nothing-to-send
       // sentinel (no prose, no send), never "already sent" / local-typed.
@@ -6682,7 +6763,7 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     const postText = bridgePostText(assistantText, adoptMode);
     if (!adoptMode && postText.trim().length === 0) continue;
 
-    if (turn.isLocal && !zeroPromptTerminalSync()) {
+    if (turn.isLocal && !turn.isScheduled && !zeroPromptTerminalSync()) {
       if (turn.userUuid) {
         // Local turn (adopt mode only): also surface the user prompt so the
         // Lark thread shows both sides of the exchange. User text comes from
@@ -6739,6 +6820,14 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
       content: deliveredText,
       lastUuid,
       turnId: turn.turnId,
+      // A built-in scheduled turn has no Lark turn of its own: anchor its reply
+      // to the topic captured when its task was created (restored from the
+      // durable anchor store after a re-attach). Thread scope ignores this and
+      // routes to the session root. Omitted in zero-injection mode —
+      // terminalLocal owns routing there.
+      ...(turn.isScheduled && !zeroPromptTerminalSync() && turn.replyAnchorTurnId
+        ? { replyTurnId: turn.replyAnchorTurnId }
+        : {}),
       ...(turn.isLocal && zeroPromptTerminalSync() ? { terminalLocal: true } : {}),
       ...(turn.dispatchAttempt !== undefined ? { dispatchAttempt: turn.dispatchAttempt } : {}),
     });
@@ -6751,9 +6840,10 @@ function emitReadyTurns(opts: { explicitTerminalOnly?: boolean } = {}): void {
     if (turn.rateLimited) continue;
     const outcome = turn.terminalOutcome;
     // A SYNTHESISED local turn has no Lark turn behind it: `local-*` /
-    // `local-headless-*` ids are minted by the queue for transcript activity
-    // that matched no pending mark (terminal-typed input, or — after a restart
-    // — replayed history whose original mark is long gone). Letting its FAILURE
+    // `local-headless-*` / `scheduled-*` ids are minted by the queue for
+    // transcript activity that matched no pending mark (terminal-typed input,
+    // a built-in CronCreate fire, or — after a restart — replayed history
+    // whose original mark is long gone). Letting its FAILURE
     // terminal through means the daemon posts a 「本轮执行失败」card for a turn
     // the user never sent — and, because the daemon stamps the card with
     // `new Date()` and the session's *current* lastUserPrompt, that card names
