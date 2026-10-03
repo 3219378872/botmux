@@ -18,7 +18,7 @@ import { clearBotmuxPromptEnv } from './skills/zero-injection.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { accessSync, chmodSync, mkdirSync, writeFileSync, unlinkSync, rmdirSync, existsSync, statSync, lstatSync, readdirSync, readlinkSync, readFileSync, realpathSync, copyFileSync, watch as fsWatch, createWriteStream, openSync, closeSync, fstatSync, constants as fsConstants, type FSWatcher, type WriteStream } from 'node:fs';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
-import { join, basename, dirname, delimiter, relative } from 'node:path';
+import { join, basename, dirname, delimiter, relative, extname } from 'node:path';
 import { resolveBotmuxWrapperBinDir, prependBotmuxBin } from './core/botmux-wrapper.js';
 import { sessionIdentityBinDir, prepareTriggerUserCliEnv, publishActiveTurn, GIT_ASKPASS_BASENAME } from './core/cli-identity.js';
 import { tokenStoreProtection } from './services/trigger-user-auth.js';
@@ -259,6 +259,8 @@ import { drainCursorTranscript, findCursorChatIdByPid, findCursorTranscriptByCha
 import { startCursorCot, stopAllCursorCot, type CursorCotEntry } from './services/cursor-cot.js';
 import { startAntigravityCot, stopAntigravityCot, stopAllAntigravityCot, type AntigravityCotEntry } from './services/antigravity-cot.js';
 import { findAntigravityConversationId, findAntigravityConversationIdByPid } from './services/antigravity-discovery.js';
+import { drainAntigravityTranscript, type AntigravityTranscriptState } from './services/antigravity-transcript.js';
+import { decideAntigravityTickerAction } from './services/antigravity-bridge-decision.js';
 import { shouldObserveCursorChatId, shouldPersistObservedCursorChatId } from './services/cursor-resume-policy.js';
 import { extractKiroSessionIdFromOutput } from './services/kiro-session.js';
 import { baselineJsonlCursor } from './services/jsonl-cursor.js';
@@ -1715,7 +1717,7 @@ function refreshCliPluginGeneration(
 ): void {
   if (cfg.promptInjection === 'none' && (!supportsZeroPromptInjection(cfg.cliId, cfg)
     || process.env[GOAL_ENV.V3_MARKER] === '1')) {
-    throw new Error('零注入需要本地 CLI 支持自动获取最终回复，暂不支持远端后端或 v3 workflow');
+    throw new Error('零注入需要本地 CLI 支持自动获取最终回复；暂不支持远端后端、v3 workflow；Cursor/Antigravity 暂不支持 scratch 全根 COW 沙箱（oncall 沙箱可用），Antigravity 暂不支持 zmx 后端（其静默终态确认依赖视口证据）');
   }
   const bot = resolvePluginGenerationBot(cfg);
 
@@ -5036,6 +5038,11 @@ let ompBridgeState: OmpTranscriptState = {};
 let ebsdBridgeState: EbsdTranscriptState = {};
 let ompQuietCandidateKey: string | undefined;
 let ompQuietCandidateCompleteOffset: number | undefined;
+/** Antigravity held (provisional) terminal + the two-tick quiet-probe latch,
+ *  same shape as OMP's. */
+let antigravityBridgeState: AntigravityTranscriptState = {};
+let antigravityQuietCandidateKey: string | undefined;
+let antigravityQuietCandidateCompleteOffset: number | undefined;
 const ompRetiredTranscriptPaths = new Set<string>();
 const ebsdRetiredTranscriptPaths = new Set<string>();
 /** Settings are observed on the same append-only cursor as bridge output.
@@ -5090,6 +5097,11 @@ let codexAdoptPendingPid: number | undefined;
  *  but BEFORE the rollout was located still reach the Lark thread. 5s
  *  skew tolerance is applied on top, mirroring the Lark/Claude bridges. */
 let codexAdoptStartMs: number | undefined;
+/** Spawn time for the current antigravity worker generation. Distinguishes a
+ *  resumed conversation (old transcript → baseline) from a `/new`-minted one
+ *  (new file carrying the live turn → ingest from byte 0), mirroring cursor's
+ *  birthtime-based late-attach rule. Set in the spawn bridge arm. */
+let antigravitySpawnStartMs: number | undefined;
 /** Open-fd discovery is cheap via /proc on Linux but shells out to lsof on
  * macOS/BSD. Lark-driven Grok rotation is immediate through writeInput; this
  * throttled poll exists for direct terminal/adopt rotation and cold collision
@@ -6917,9 +6929,16 @@ function drainPathInto(path: string, fromOffset: number): { offset: number; tail
 
 function codexBridgeFallbackActive(): boolean {
   // Transcript-backed CLIs whose final output can be harvested when the
-  // model forgets to call `botmux send`. Cursor is adopt-only — see
-  // services/structured-bridge-clis.ts (single source of the allowlist).
-  return isStructuredBridgeFallbackActive(lastInitConfig?.cliId, lastInitConfig?.adoptMode === true);
+  // model forgets to call `botmux send`. Cursor is adopt-only by default —
+  // see services/structured-bridge-clis.ts (single source of the allowlist).
+  // Cursor + antigravity additionally activate for botmux-spawned sessions
+  // under promptInjection:'none' (zero-prompt: there IS no `botmux send`
+  // channel, so the transcript is the only delivery path).
+  return isStructuredBridgeFallbackActive(
+    lastInitConfig?.cliId,
+    lastInitConfig?.adoptMode === true,
+    lastInitConfig?.promptInjection === 'none',
+  );
 }
 
 /** A Codex App shared-adopt starts a SECOND official `codex --remote` client
@@ -6989,6 +7008,10 @@ function codexBridgeIsCursor(): boolean {
   return lastInitConfig?.cliId === 'cursor';
 }
 
+function structuredBridgeIsAntigravity(): boolean {
+  return lastInitConfig?.cliId === 'antigravity';
+}
+
 function currentHermesBridgeDbPath(): string {
   return hermesBridgeDbPath ?? resolveHermesStateDbPath();
 }
@@ -6996,7 +7019,7 @@ function currentHermesBridgeDbPath(): string {
 function structuredBridgeIngestPath(
   path: string,
   offset: number,
-  opts: { flushOmpTrailingFinal?: boolean } = {},
+  opts: { flushOmpTrailingFinal?: boolean; flushAntigravityTrailingFinal?: boolean } = {},
 ) {
   if (structuredBridgeIsCodex()) {
     const result = drainCodexRollout(path, offset, codexBridgeDrainState);
@@ -7009,6 +7032,11 @@ function structuredBridgeIngestPath(
     return drainTraexRollout(path, offset, { adoptMode: lastInitConfig?.adoptMode === true });
   }
   if (codexBridgeIsCursor()) return drainCursorTranscript(path, offset);
+  if (structuredBridgeIsAntigravity()) {
+    return drainAntigravityTranscript(path, offset, antigravityBridgeState, {
+      flushTrailingFinal: opts.flushAntigravityTrailingFinal,
+    });
+  }
   if (structuredBridgeIsPi()) return drainPiTranscript(path, offset);
   if (structuredBridgeIsEbsd()) {
     const result = drainEbsdTranscript(path, offset, ebsdBridgeState);
@@ -7080,21 +7108,87 @@ function codexBridgeStartTimer(): void {
         // session is already running), so cursorBridgeAttach in setup wins.
         // This covers the rare race where pid→chatId resolved but the JSONL
         // hadn't been created yet. Resolution order: chatId (cliSessionId) →
-        // path; then adopt pid → store.db fd → chatId → path.
+        // path; then the observed cursor pid → store.db fd → chatId → path.
+        // Adopt uses the adopt pid + baseline attach; botmux-spawned
+        // (zero-prompt) uses the live backend pid (wrapper-resolved) and a
+        // fresh/resume attach so the argv-baked first turn stays attributable.
         if (!codexBridgeRolloutPath) {
-          let path = codexBridgePendingSessionId
+          let path: string | undefined = codexBridgePendingSessionId
             ? findCursorTranscriptByChatId(codexBridgePendingSessionId)
             : undefined;
-          if (!path && codexAdoptPendingPid) {
-            path = findCursorTranscriptByPid(codexAdoptPendingPid)?.path;
+          if (!path) {
+            const pid = lastInitConfig?.adoptMode
+              ? codexAdoptPendingPid
+              : currentCursorObservedPid();
+            if (pid) path = findCursorTranscriptByPid(pid)?.path;
           }
           if (path) {
             codexBridgePendingSessionId = undefined;
             codexAdoptPendingPid = undefined;
-            cursorBridgeAttach(path, cursorLateAttachMode(path));
+            if (lastInitConfig?.adoptMode) {
+              cursorBridgeAttach(path, cursorLateAttachMode(path));
+            } else {
+              // The spawn observer normally starts the CoT reader; cover the
+              // race where the ticker's pid probe binds the transcript first.
+              ensureCursorCotReader(path.split('/').slice(-2, -1)[0]);
+              codexBridgeAttach(path, structuredSpawnAttachMode());
+            }
           }
         }
         codexBridgeIngest();
+        if (isPromptReady) emitReadyCodexTurns();
+        return;
+      }
+      if (structuredBridgeIsAntigravity()) {
+        // Antigravity has no /adopt bridge: this branch runs only for
+        // botmux-spawned zero-prompt sessions. writeInput's pid probe usually
+        // reports the conversation id through codexBridgeNotifyCliSessionId;
+        // the pid fallback here recovers a probe that lost the race.
+        //
+        // Resolve while UNBOUND or while a lazy-created conversation is still
+        // pending — the latter also covers a /new rotation: the notify path
+        // stored the new id while its brain file did not exist yet, and the
+        // retired conversation's path is still bound. Gating only on
+        // !codexBridgeRolloutPath would leave the new file unattached forever.
+        if (!codexBridgeRolloutPath || codexBridgePendingSessionId) {
+          const action = decideAntigravityTickerAction({
+            boundPath: codexBridgeRolloutPath,
+            pendingSid: codexBridgePendingSessionId,
+            resolveBySid: sid => resolveFileBridgePath('antigravity', { sessionId: sid }),
+            resolveByPid: () => {
+              const pid = currentAntigravityObservedPid();
+              return pid ? resolveFileBridgePath('antigravity', { pid }) : undefined;
+            },
+          });
+          if (action.kind === 'rotate') {
+            // A new conversation resolved while the retired one is bound
+            // (either the pending SID authoritatively, or the pid's open
+            // conversation switched): release the retired conversation's held
+            // final, then bind the new one fresh so its live turn is ingested
+            // from byte 0 (never as history).
+            codexBridgePendingSessionId = undefined;
+            codexAdoptPendingPid = undefined;
+            try {
+              codexBridgeIngest({ flushAntigravityTrailingFinal: true });
+              emitReadyCodexTurns();
+            } catch (err: any) {
+              log(`Antigravity late-rotation bridge drain failed: ${err.message}`);
+            }
+            codexBridgeDetachFile();
+            codexBridgeAttach(action.path, 'fresh-empty');
+          } else if (action.kind === 'bind-initial') {
+            codexBridgePendingSessionId = undefined;
+            codexAdoptPendingPid = undefined;
+            codexBridgeAttach(action.path, antigravityLateAttachMode(action.path));
+          } else if (action.kind === 'clear-pending') {
+            // Provenance: only a direct SID hit reaches here. A pid hit on the
+            // bound path returns 'idle' and leaves a pending NEW id intact
+            // (the retired conversation's fd can still be the one open).
+            codexBridgePendingSessionId = undefined;
+          }
+        }
+        codexBridgeIngest();
+        maybeFlushAntigravityTrailingFinalOnQuietTick();
         if (isPromptReady) emitReadyCodexTurns();
         return;
       }
@@ -7151,6 +7245,7 @@ function codexBridgeStartTimer(): void {
       }
       codexBridgeIngest();
       maybeFlushOmpTrailingFinalOnQuietTick();
+      maybeFlushAntigravityTrailingFinalOnQuietTick();
       if (isPromptReady) emitReadyCodexTurns();
     } catch (err: any) {
       log(`Codex bridge tick error: ${err.message}`);
@@ -7249,8 +7344,11 @@ function mtrBridgeIngest(): void {
 function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'baseline-existing-skip-tail' | 'fresh-empty' | 'split-live'): void {
   ompBridgeState = {};
   ebsdBridgeState = {};
+  antigravityBridgeState = {};
   ompQuietCandidateKey = undefined;
   ompQuietCandidateCompleteOffset = undefined;
+  antigravityQuietCandidateKey = undefined;
+  antigravityQuietCandidateCompleteOffset = undefined;
   codexBridgeRolloutPath = rolloutPath;
   codexBridgeDrainState = undefined;
   if (structuredBridgeIsCodex()) codexServiceTierTracker.bind(rolloutPath);
@@ -7501,8 +7599,11 @@ function codexBridgeDetachFile(): void {
   codexBridgeBaselineDone = false;
   ompBridgeState = {};
   ebsdBridgeState = {};
+  antigravityBridgeState = {};
   ompQuietCandidateKey = undefined;
   ompQuietCandidateCompleteOffset = undefined;
+  antigravityQuietCandidateKey = undefined;
+  antigravityQuietCandidateCompleteOffset = undefined;
 }
 
 /** Resolve the pid of the Codex process this worker observes (spawned child or
@@ -7511,6 +7612,48 @@ function currentCodexObservedPid(): number | undefined {
   return (backend as { cliPid?: number } | null)?.cliPid
     ?? backend?.getChildPid?.()
     ?? codexAdoptPendingPid;
+}
+
+/** The live cursor-agent pid holding the chat's store.db open. backend.cliPid
+ *  can be a wrapper launcher, so descend like armCursorCotForTurn does; adopt
+ *  sessions keep using their dedicated adopt pid. */
+function currentCursorObservedPid(): number | undefined {
+  if (lastInitConfig?.adoptMode) return codexAdoptPendingPid;
+  const pid = (backend as { cliPid?: number } | null)?.cliPid ?? backend?.getChildPid?.();
+  return pid ? (findLaunchedCliPid(pid, 'cursor') ?? pid) : undefined;
+}
+
+/** The live `agy` conversation-holding pid (antigravity's pid probe scans the
+ *  pid's children too, but the wrapper descent matches the CoT arm path). */
+function currentAntigravityObservedPid(): number | undefined {
+  const pid = (backend as { cliPid?: number } | null)?.cliPid
+    ?? backend?.getChildPid?.()
+    ?? codexAdoptPendingPid;
+  return pid ? (findLaunchedCliPid(pid, 'antigravity') ?? pid) : undefined;
+}
+
+/** Structured-bridge attach mode for a botmux-SPAWNED session: a fresh spawn
+ *  ingests from byte 0 (the first user turn was marked pre-spawn, incl.
+ *  cursor's argv-baked prompt); a resume spawn baselines the tail so history
+ *  from the previous worker run never replays into Lark. Adopt uses its own
+ *  split-live / birthtime-based modes elsewhere. */
+function structuredSpawnAttachMode(): 'fresh-empty' | 'baseline-existing' {
+  return lastSpawnEffectiveResume ? 'baseline-existing' : 'fresh-empty';
+}
+
+/** Attach mode for an antigravity transcript resolved AFTER spawn (lazy file
+ *  creation or a `/new` rotation discovered through writeInput). Even on a
+ *  resume spawn, a file born after spawn is a brand-new conversation whose
+ *  bytes are the live turn, not history. */
+function antigravityLateAttachMode(transcriptPath: string): 'fresh-empty' | 'baseline-existing' {
+  if (!lastSpawnEffectiveResume) return 'fresh-empty';
+  try {
+    const birthtimeMs = statSync(transcriptPath).birthtimeMs;
+    if (Number.isFinite(birthtimeMs) && birthtimeMs >= (antigravitySpawnStartMs ?? Date.now()) - 5_000) {
+      return 'fresh-empty';
+    }
+  } catch { /* fall back to the resume-safe baseline */ }
+  return 'baseline-existing';
 }
 
 /** Ownership gate for binding a Codex bridge to a session id that came from the
@@ -7743,8 +7886,55 @@ function codexBridgeNotifyCliSessionId(cliSessionId: string): void {
     const cursorPath = resolveFileBridgePath('cursor', { sessionId: cliSessionId });
     if (cursorPath) {
       codexBridgePendingSessionId = undefined;
-      cursorBridgeAttach(cursorPath, cursorLateAttachMode(cursorPath));
+      if (lastInitConfig?.adoptMode) {
+        cursorBridgeAttach(cursorPath, cursorLateAttachMode(cursorPath));
+      } else {
+        // Botmux-spawned (zero-prompt): NOT cursorBridgeAttach — its
+        // baseline-existing mode drains an adopt preamble, which is wrong for
+        // a spawned session. Fresh/resume decides whether the argv-baked
+        // first turn must be ingested from byte 0; the CoT reader is owned by
+        // the spawn observer (observeCursorCliSessionId), not by the attach.
+        codexBridgeAttach(cursorPath, structuredSpawnAttachMode());
+      }
     } else {
+      codexBridgePendingSessionId = cliSessionId;
+      codexBridgeStartTimer();
+    }
+    return;
+  }
+  if (structuredBridgeIsAntigravity()) {
+    // cliSessionId is agy's conversation UUID, which names the brain
+    // transcript directory. writeInput reports the id on EVERY submit (it is
+    // also how `/new` surfaces the freshly-minted conversation in the same
+    // process), so this is both the first-attach and the rotation path.
+    const agyPath = resolveFileBridgePath('antigravity', { sessionId: cliSessionId });
+    if (agyPath === codexBridgeRolloutPath) {
+      codexBridgePendingSessionId = undefined;
+      return;
+    }
+    if (agyPath) {
+      if (codexBridgeRolloutPath) {
+        // Conversation rotated (/new): drain the retired transcript so a
+        // trailing final is not stranded, then rebind. The new conversation's
+        // existing bytes are THIS session's live turn, never history →
+        // fresh-empty regardless of the spawn resume flag.
+        try {
+          // Flush the retired conversation's held candidate: the new
+          // conversation starting proves the old loop ended.
+          codexBridgeIngest({ flushAntigravityTrailingFinal: true });
+          emitReadyCodexTurns();
+        } catch (err: any) {
+          log(`Antigravity pre-rotation bridge drain failed: ${err.message}`);
+        }
+        codexBridgeDetachFile();
+        codexBridgeAttach(agyPath, 'fresh-empty');
+      } else {
+        codexBridgeAttach(agyPath, antigravityLateAttachMode(agyPath));
+      }
+      codexBridgePendingSessionId = undefined;
+    } else {
+      // The brain file is created lazily after submit — keep id pending and
+      // let the 1s ticker late-attach (pid probe covers a lost race).
       codexBridgePendingSessionId = cliSessionId;
       codexBridgeStartTimer();
     }
@@ -7888,6 +8078,7 @@ function codexBridgeIngest(opts: {
   signalIdle?: boolean;
   hydrationOwnerKey?: string;
   flushOmpTrailingFinal?: boolean;
+  flushAntigravityTrailingFinal?: boolean;
 } = {}): void {
   // Follow-up RPC turns install their exact bridge mark only after the
   // turn/start ACK passes the generation fence. Ordinary ingest must not
@@ -7909,9 +8100,13 @@ function codexBridgeIngest(opts: {
   if (!codexBridgeRolloutPath || !codexBridgeBaselineDone) return;
   const result = structuredBridgeIngestPath(codexBridgeRolloutPath, codexBridgeOffset, {
     flushOmpTrailingFinal: opts.flushOmpTrailingFinal,
+    flushAntigravityTrailingFinal: opts.flushAntigravityTrailingFinal,
   });
   codexBridgeOffset = result.newOffset;
   codexBridgePendingTail = result.pendingTail;
+  if (structuredBridgeIsAntigravity()) {
+    antigravityBridgeState = (result as { state?: AntigravityTranscriptState }).state ?? {};
+  }
   if (structuredBridgeIsTraex()) {
     const traex = result as TraexDrainResult;
     publishActiveRuntime({
@@ -7940,7 +8135,16 @@ function codexBridgeIngest(opts: {
   // its own moving targets). Pushing idle here lets the bridge emit
   // immediately instead of waiting for readyPattern + quiescence to
   // converge. Idempotent — IdleDetector.fireIdle no-ops while already idle.
-  if (opts.signalIdle !== false && result.events.some(event => event.kind === 'assistant_final')) {
+  //
+  // Antigravity is excluded: its assistant_final is PROVISIONAL (held in
+  // antigravityBridgeState) and is released only by
+  // maybeFlushAntigravityTrailingFinalOnQuietTick after the viewport itself
+  // proves idle + ready. Firing idle on the intermediate "Wait for task …"
+  // step would mark the turn done while a background-task SYSTEM_MESSAGE is
+  // about to wake the planner for another round.
+  if (opts.signalIdle !== false
+    && !structuredBridgeIsAntigravity()
+    && result.events.some(event => event.kind === 'assistant_final')) {
     idleDetector?.fireIdle();
   }
 }
@@ -7977,6 +8181,56 @@ function maybeFlushOmpTrailingFinalOnQuietTick(): void {
   ompQuietCandidateKey = undefined;
   ompQuietCandidateCompleteOffset = undefined;
   codexBridgeIngest({ flushOmpTrailingFinal: true });
+}
+
+/**
+ * Confirm an Antigravity held (provisional) terminal only after one complete
+ * quiet bridge tick AND a viewport that is on the ready marker with no busy
+ * marker. The held candidate is the content-only "Wait for task …" shape ~17%
+ * of turns produce before a background-task/stop-hook SYSTEM_MESSAGE wakes the
+ * planner; releasing it the moment it lands would post the interim narration
+ * and lose the real final.
+ *
+ * Unlike OMP this driver is NOT lifecycle-blocking, so the screen evidence is
+ * the only gate: require BOTH ready (`? for shortcuts`) and not-busy
+ * (`esc to cancel`). The intermediate background-task wait shows the READY
+ * marker, but the subsequent wake-up produces a busy screen within ~1s, so the
+ * two-tick unchanged-offset latch lets that continuation cancel the candidate
+ * before it is flushed. */
+function maybeFlushAntigravityTrailingFinalOnQuietTick(): void {
+  if (!structuredBridgeIsAntigravity()) return;
+  const candidate = antigravityBridgeState.provisionalFinal;
+  if (!candidate || antigravityBridgeState.hasPendingTask) {
+    // No candidate, or the transcript itself proves a background task is still
+    // outstanding (the TUI shows the ready composer during that wait — do not
+    // arm the quiet latch on screen evidence the transcript contradicts).
+    antigravityQuietCandidateKey = undefined;
+    antigravityQuietCandidateCompleteOffset = undefined;
+    return;
+  }
+  const key = candidate.uuid;
+  if (antigravityQuietCandidateKey !== key
+    || antigravityQuietCandidateCompleteOffset !== codexBridgeOffset) {
+    antigravityQuietCandidateKey = key;
+    antigravityQuietCandidateCompleteOffset = codexBridgeOffset;
+    return;
+  }
+  if (codexBridgePendingTail || !backend
+    || !backendScreenEvidenceIsAuthoritativeForMutation()
+    || !cliAdapter?.busyPattern || !cliAdapter.readyPattern) return;
+  try {
+    const screen = captureBackendScreen(backend);
+    if (!screen) return;
+    if (cliAdapter.busyPattern.test(busyProbeRegion(screen))) return;
+    if (!cliAdapter.readyPattern.test(stripAnsiScreenText(screen))) return;
+  } catch (err: any) {
+    log(`Antigravity quiet-final viewport capture failed: ${err.message}`);
+    return;
+  }
+
+  antigravityQuietCandidateKey = undefined;
+  antigravityQuietCandidateCompleteOffset = undefined;
+  codexBridgeIngest({ flushAntigravityTrailingFinal: true });
 }
 
 /** 将 Codex 的结构化 429 终态同步为既有的限流状态。 */
@@ -8598,8 +8852,11 @@ function stopCodexBridge(): void {
   codexBridgeBaselineDone = false;
   ompBridgeState = {};
   ebsdBridgeState = {};
+  antigravityBridgeState = {};
   ompQuietCandidateKey = undefined;
   ompQuietCandidateCompleteOffset = undefined;
+  antigravityQuietCandidateKey = undefined;
+  antigravityQuietCandidateCompleteOffset = undefined;
   ompRetiredTranscriptPaths.clear();
   ebsdRetiredTranscriptPaths.clear();
   hermesBridgeOffset = 0;
@@ -12032,6 +12289,9 @@ function observeCursorCliSessionId(pid: number, label = 'spawn'): void {
       // The chat's store exists now: start the session-long thinking reader,
       // covering the argv-baked first turn (which never enters flushPending).
       ensureCursorCotReader(chatId);
+      // Bind the zero-prompt transcript bridge the moment the chat is known.
+      // No-op in default mode (bridge inactive for spawned cursor).
+      if (codexBridgeFallbackActive()) codexBridgeNotifyCliSessionId(chatId);
       return;
     }
     attempts++;
@@ -12063,6 +12323,10 @@ function observeAntigravityCliSessionId(pid: number, label = 'spawn'): void {
       persistCliSessionId(cid);
       log(`Observed Antigravity conversationId via pid ${realPid}${realPid === pid ? '' : ` (launcher ${pid})`} (${label}): ${cid}`);
       ensureAntigravityCotReader(cid);
+      // Bind the zero-prompt transcript bridge as soon as the conversation is
+      // known (its brain file may not exist yet — notify then leaves the id
+      // pending for the 1s ticker). No-op in default mode (bridge inactive).
+      if (codexBridgeFallbackActive()) codexBridgeNotifyCliSessionId(cid);
       return;
     }
     attempts++;
@@ -12833,6 +13097,11 @@ async function flushPending(): Promise<void> {
           if (bridgeTurnId) {
             codexBridgeQueue.beginSubmitVerification(bridgeTurnId, undefined, item.dispatchAttempt);
           }
+          // Cursor/antigravity reach this branch only in zero-prompt mode; in
+          // default mode they take their dedicated CoT-only branches below.
+          // Keep arming the session-long thinking reader at every write.
+          if (lastInitConfig?.cliId === 'cursor') armCursorCotForTurn();
+          else if (lastInitConfig?.cliId === 'antigravity') armAntigravityCotForTurn();
         } else if (lastInitConfig?.cliId === 'cursor' && !writeRpcEngine) {
           // Reader is session-long; this also covers turns whose chatId the
           // spawn-time observation has not resolved yet.
@@ -14698,6 +14967,22 @@ async function spawnCli(
   if (scratchRequested && cfg.readIsolation === true) {
     throw new Error('sandbox "scratch" cannot be combined with the legacy readIsolation flag');
   }
+  // Authoritative zero-prompt capability gate with the RESOLVED sandbox mode.
+  // The config/command-time supportsZeroPromptInjection call only sees the
+  // CONFIG/session sandbox value; the machine-wide BOTMUX_SANDBOX switch (esp.
+  // =scratch) is resolved into sandboxMode here via resolveSandboxMode but is
+  // never materialised into cfg. Re-check with the resolved mode (and the real
+  // backend) so zero-prompt cursor/antigravity cannot silently drop replies
+  // under the full-root COW overlay (authPaths binds do not apply there) or on a
+  // backend whose final-harvest path is unsupported (antigravity × zmx).
+  if (cfg.promptInjection === 'none' && !supportsZeroPromptInjection(cfg.cliId, {
+    backendType: effectiveBackendType,
+    sandbox: sandboxMode,
+    readIsolation: cfg.readIsolation === true,
+    codexRpcInput: cfg.codexRpcInput === true,
+  })) {
+    throw new Error('零注入需要本地 CLI 支持自动获取最终回复；暂不支持远端后端、v3 workflow；Cursor/Antigravity 暂不支持 scratch 全根 COW 沙箱（oncall 沙箱可用），Antigravity 暂不支持 zmx 后端（其静默终态确认依赖视口证据）');
+  }
   if (cfg.cliLaunchMode === 'forge-traex' && sandboxRequested) {
     throw new Error('Forge x TraeX does not support sandbox/readIsolation yet');
   }
@@ -16559,6 +16844,18 @@ async function spawnCli(
     // 目录（记录是 tmp+rename 原子写，外加同目录的 .lock），先建好给 bwrap 当 bind 源。
     try { mkdirSync(turnSendLedgerSessionDir(dataDir, cfg.sessionId), { recursive: true, mode: 0o700 }); } catch { /* */ }
     try { mkdirSync(join(dataDir, 'attachments', cfg.larkAppId), { recursive: true }); } catch { /* */ }
+    // Adapter-declared whole-DIRECTORY state roots that the fs-policy bind-
+    // mounts readWrite (cursor ~/.cursor, antigravity ~/.gemini). bwrap cannot
+    // bind a missing source, and these legitimately do not exist on a fresh
+    // host, so create them here at SPAWN (never at adapter-module load — the
+    // capabilities contract forbids creating runtime state on import). File-
+    // shaped authPaths (oauth token files, identified by an extension) are
+    // skipped: mkdir on them would create a directory in the token's place.
+    for (const authPath of cliAdapter.authPaths ?? []) {
+      const expanded = expandTildeLexical(authPath);
+      if (extname(expanded) !== '') continue;
+      try { mkdirSync(canonical(expanded), { recursive: true }); } catch { /* best effort */ }
+    }
     // (Schedules moved into each bot's BOT_HOME — the whole dir is already
     // bound readWrite for the owner, so no per-file pre-create is needed.)
 
@@ -18066,6 +18363,34 @@ async function spawnCli(
     const source = findMtrSessionById(mtrSessionId);
     if (source) {
       mtrBridgeAttach(source, effectiveResume ? 'baseline-existing' : 'fresh-empty');
+    } else {
+      codexBridgeStartTimer();
+    }
+  } else if ((cfg.cliId === 'cursor' || cfg.cliId === 'antigravity') && codexBridgeFallbackActive()) {
+    // Zero-prompt spawns only — in default injection mode these two CLIs are
+    // NOT bridge-active (they deliver via `botmux send`), so this branch is a
+    // no-op for them. Neither transcript path is known at spawn:
+    //  - cursor's first prompt is argv-baked; the chatId comes from polling
+    //    the child's open store.db fd (observeCursorCliSessionId → notify;
+    //    the ticker pid-probes when that loses the race);
+    //  - antigravity's conversation id comes from the first writeInput, and
+    //    its brain transcript is created lazily afterwards.
+    // Pin the path when a resume id is already known; otherwise arm poller.
+    if (cfg.cliId === 'antigravity') antigravitySpawnStartMs = Date.now();
+    if (effectiveCliSessionId) {
+      const path = resolveFileBridgePath(cfg.cliId, {
+        sessionId: effectiveCliSessionId,
+        cwd: cfg.workingDir,
+      });
+      if (path) {
+        const mode = cfg.cliId === 'antigravity'
+          ? antigravityLateAttachMode(path)
+          : effectiveResume ? 'baseline-existing' : 'fresh-empty';
+        codexBridgeAttach(path, mode);
+      } else {
+        codexBridgePendingSessionId = effectiveCliSessionId;
+        codexBridgeStartTimer();
+      }
     } else {
       codexBridgeStartTimer();
     }
